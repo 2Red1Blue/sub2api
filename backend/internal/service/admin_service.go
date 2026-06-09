@@ -2613,6 +2613,7 @@ func (s *adminServiceImpl) CreateAccounts(ctx context.Context, inputs []*CreateA
 	}
 
 	defaultGroupsByPlatform := map[string][]int64{}
+	mixedChannelChecks := map[string]error{}
 	accounts := make([]*Account, 0, len(inputs))
 	groupIDsByAccountIndex := make([][]int64, len(inputs))
 	for i, input := range inputs {
@@ -2627,7 +2628,14 @@ func (s *adminServiceImpl) CreateAccounts(ctx context.Context, inputs []*CreateA
 		}
 
 		if len(groupIDs) > 0 && !input.SkipMixedChannelCheck {
-			if err := s.checkMixedChannelRisk(ctx, 0, input.Platform, groupIDs); err != nil {
+			groupKey := uniqueInt64Key(groupIDs)
+			checkKey := input.Platform + "|" + groupKey.key
+			err, checked := mixedChannelChecks[checkKey]
+			if !checked {
+				err = s.checkMixedChannelRisk(ctx, 0, input.Platform, groupKey.ids)
+				mixedChannelChecks[checkKey] = err
+			}
+			if err != nil {
 				return nil, err
 			}
 		}
