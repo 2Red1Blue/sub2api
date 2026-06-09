@@ -8,8 +8,10 @@ It adds a floating "账号巡检" panel on `/admin/accounts` and can:
 
 - Read the current admin `Authorization` token automatically.
 - Detect the target group from URL/query, group filter controls, or the visible accounts table when every visible row belongs to the same group.
+- Resolve a group name such as `codex` to the numeric group ID required by the admin accounts API.
 - Let the operator manually enter and save the target group.
 - Batch test account models and optionally turn off account scheduling when a model check fails.
+- Optionally delete accounts whose test result explicitly says the authentication token has been invalidated.
 
 ## Authorization source
 
@@ -34,3 +36,13 @@ The script reads the target group in this order:
 4. Manual input in the "测活分组" field.
 
 If the visible table contains multiple groups, the script will ask for manual confirmation instead of guessing.
+
+The admin accounts API requires `group` to be a numeric group ID or `ungrouped`. When the panel has a group name, the script fetches `/api/v1/admin/groups/all` and converts the name to its ID before requesting `/api/v1/admin/accounts`.
+
+## Invalid auth deletion
+
+When "认证失效时自动删除账号" is enabled, the script deletes an account only if the model test error clearly matches an invalidated authentication token, such as:
+
+`Your authentication token has been invalidated. Please try signing in again`
+
+Other failures, including rate limits, timeouts, HTTP errors, model errors, and quota errors, are not deleted by this rule.

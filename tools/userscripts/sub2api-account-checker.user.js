@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sub2API 账号模型巡检并自动下线
 // @namespace    https://sinry.example
-// @version      0.1.2
+// @version      0.1.4
 // @description  按当前页面分组批量测试账号模型；任一模型异常时自动关闭账号 schedulable；已关闭调度账号跳过
 // @match        http://127.0.0.1:18080/admin/accounts*
 // @run-at       document-start
@@ -30,7 +30,10 @@
     testModelStorageKey: '__sub2api_checker_test_model__',
     currentGroupStorageKey: '__sub2api_checker_current_group__',
     autoDisableStorageKey: '__sub2api_checker_auto_disable__',
+    autoDeleteInvalidAuthStorageKey: '__sub2api_checker_auto_delete_invalid_auth__',
   };
+
+  const groupIDCache = new Map();
 
   function getCachedAuthToken() {
     const raw =
@@ -55,12 +58,17 @@
     return localStorage.getItem(CONFIG.autoDisableStorageKey) !== 'false';
   }
 
+  function readSavedAutoDeleteInvalidAuth() {
+    return localStorage.getItem(CONFIG.autoDeleteInvalidAuthStorageKey) !== 'false';
+  }
+
   const state = {
     authHeader: getCachedAuthToken(),
     timeoutMs: Number(localStorage.getItem(CONFIG.timeoutStorageKey) || CONFIG.defaultTimeoutMs),
     concurrency: readSavedConcurrency(),
     testModel: localStorage.getItem(CONFIG.testModelStorageKey) || CONFIG.defaultTestModel,
     autoDisable: readSavedAutoDisable(),
+    autoDeleteInvalidAuth: readSavedAutoDeleteInvalidAuth(),
     currentGroup: normalizeGroup(localStorage.getItem(CONFIG.currentGroupStorageKey)),
     running: false,
     stopRequested: false,
@@ -74,6 +82,7 @@
       ok: 0,
       enabled: 0,
       disabled: 0,
+      deleted: 0,
       skipped: 0,
       failed: 0,
     },
@@ -141,6 +150,14 @@
     localStorage.setItem(CONFIG.autoDisableStorageKey, String(state.autoDisable));
     const input = document.querySelector('#sub2api-checker-auto-disable');
     if (input) input.checked = state.autoDisable;
+    return true;
+  }
+
+  function saveAutoDeleteInvalidAuth(enabled) {
+    state.autoDeleteInvalidAuth = !!enabled;
+    localStorage.setItem(CONFIG.autoDeleteInvalidAuthStorageKey, String(state.autoDeleteInvalidAuth));
+    const input = document.querySelector('#sub2api-checker-auto-delete-invalid-auth');
+    if (input) input.checked = state.autoDeleteInvalidAuth;
     return true;
   }
 
@@ -426,7 +443,7 @@
     if (!el) return;
     const s = state.stats;
     const queued = Math.max(0, s.total - s.checked - s.active);
-    el.textContent = `总数 ${s.total} | 运行中 ${s.active} | 队列 ${queued} | 已处理 ${s.checked} | 正常 ${s.ok} | 已启用 ${s.enabled} | 已关闭 ${s.disabled} | 跳过 ${s.skipped} | 异常 ${s.failed}`;
+    el.textContent = `总数 ${s.total} | 运行中 ${s.active} | 队列 ${queued} | 已处理 ${s.checked} | 正常 ${s.ok} | 已启用 ${s.enabled} | 已关闭 ${s.disabled} | 已删除 ${s.deleted} | 跳过 ${s.skipped} | 异常 ${s.failed}`;
   }
 
   function updatePanelCollapsed() {
@@ -542,6 +559,10 @@
           <input id="sub2api-checker-auto-disable" type="checkbox" style="margin:0;" />
           <span>模型异常时自动关闭账号调度</span>
         </label>
+        <label style="display:flex;gap:8px;align-items:center;color:#d9d9d9;">
+          <input id="sub2api-checker-auto-delete-invalid-auth" type="checkbox" style="margin:0;" />
+          <span>认证失效时自动删除账号</span>
+        </label>
         <div style="display:flex;gap:8px;align-items:center;color:#bfbfbf;">
           <span>当前页面分组：</span>
           <strong id="sub2api-checker-current-group" style="flex:1;color:#ffd666;">未识别</strong>
@@ -552,7 +573,7 @@
           <button id="sub2api-checker-start" style="flex:1;padding:8px 10px;border:0;border-radius:8px;background:#1677ff;color:#fff;cursor:pointer;">开始巡检</button>
           <button id="sub2api-checker-stop" style="flex:1;padding:8px 10px;border:0;border-radius:8px;background:#fa541c;color:#fff;cursor:pointer;">停止</button>
         </div>
-        <div id="sub2api-checker-stats" style="color:#bfbfbf;">总数 0 | 运行中 0 | 队列 0 | 已处理 0 | 正常 0 | 已启用 0 | 已关闭 0 | 跳过 0 | 异常 0</div>
+        <div id="sub2api-checker-stats" style="color:#bfbfbf;">总数 0 | 运行中 0 | 队列 0 | 已处理 0 | 正常 0 | 已启用 0 | 已关闭 0 | 已删除 0 | 跳过 0 | 异常 0</div>
         <div id="sub2api-checker-log" style="height:320px;overflow:auto;background:#0b0f17;border:1px solid #30363d;border-radius:8px;padding:8px;"></div>
       </div>
       </div>
@@ -608,6 +629,13 @@
       log(`模型异常时${state.autoDisable ? '会' : '不会'}自动关闭账号调度`, 'success');
     });
 
+    const autoDeleteInvalidAuthInput = root.querySelector('#sub2api-checker-auto-delete-invalid-auth');
+    autoDeleteInvalidAuthInput.checked = state.autoDeleteInvalidAuth;
+    autoDeleteInvalidAuthInput.addEventListener('change', () => {
+      saveAutoDeleteInvalidAuth(autoDeleteInvalidAuthInput.checked);
+      log(`认证失效时${state.autoDeleteInvalidAuth ? '会' : '不会'}自动删除账号`, 'success');
+    });
+
     root.querySelector('#sub2api-checker-refresh-group').addEventListener('click', () => {
       const group = readCurrentGroup();
       if (group) {
@@ -657,7 +685,73 @@
     return resp;
   }
 
+  async function parseErrorResponse(resp) {
+    try {
+      const text = await resp.text();
+      if (!text) return '';
+      return text.slice(0, 500);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function normalizeGroupNameKey(group) {
+    return normalizeGroup(group).toLowerCase();
+  }
+
+  async function resolveGroupFilterValue(group) {
+    const normalized = normalizeGroup(group);
+    if (!normalized) return '';
+    if (normalized === 'ungrouped' || /^\d+$/.test(normalized)) return normalized;
+
+    const cacheKey = normalizeGroupNameKey(normalized);
+    if (groupIDCache.has(cacheKey)) return groupIDCache.get(cacheKey);
+
+    const resp = await apiFetch(`${CONFIG.apiBase}/api/v1/admin/groups/all`, {
+      headers: { Accept: 'application/json, text/plain, */*' },
+    });
+    if (!resp.ok) {
+      const detail = await parseErrorResponse(resp);
+      throw new Error(`分组列表请求失败：HTTP ${resp.status}${detail ? `，${detail}` : ''}`);
+    }
+
+    const json = await resp.json();
+    if (json.code !== 0) {
+      throw new Error(`分组列表返回异常：${json.message || json.code}`);
+    }
+
+    const groups = Array.isArray(json.data) ? json.data : [];
+    for (const item of groups) {
+      const nameKey = normalizeGroupNameKey(item?.name);
+      const id = item?.id;
+      if (!nameKey || id === undefined || id === null) continue;
+      groupIDCache.set(nameKey, String(id));
+    }
+
+    const resolved = groupIDCache.get(cacheKey);
+    if (!resolved) {
+      throw new Error(`没有找到名为 ${normalized} 的分组，请填写分组 ID 或确认分组名称`);
+    }
+
+    return resolved;
+  }
+
+  function isInvalidatedAuthError(reason) {
+    const text = String(reason || '').toLowerCase();
+    return (
+      text.includes('authentication token has been invalidated') ||
+      text.includes('please try signing in again') ||
+      text.includes('token has been invalidated') ||
+      text.includes('invalidated token')
+    );
+  }
+
   async function fetchAccounts() {
+    const groupFilter = await resolveGroupFilterValue(state.currentGroup);
+    if (groupFilter !== state.currentGroup) {
+      log(`分组 ${state.currentGroup} 已解析为 ID ${groupFilter}`, 'success');
+    }
+
     let page = 1;
     const items = [];
     while (true) {
@@ -668,14 +762,17 @@
       url.searchParams.set('type', '');
       url.searchParams.set('status', '');
       url.searchParams.set('privacy_mode', '');
-      url.searchParams.set('group', state.currentGroup);
+      url.searchParams.set('group', groupFilter);
       url.searchParams.set('search', '');
       url.searchParams.set('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai');
 
       const resp = await apiFetch(url.toString(), {
         headers: { Accept: 'application/json, text/plain, */*' },
       });
-      if (!resp.ok) throw new Error(`账号列表请求失败：HTTP ${resp.status}`);
+      if (!resp.ok) {
+        const detail = await parseErrorResponse(resp);
+        throw new Error(`账号列表请求失败：HTTP ${resp.status}${detail ? `，${detail}` : ''}`);
+      }
       const json = await resp.json();
       if (json.code !== 0) throw new Error(`账号列表返回异常：${json.message || json.code}`);
 
@@ -806,6 +903,24 @@
     return { ok: true, data: json.data };
   }
 
+  async function deleteAccount(accountId) {
+    const resp = await apiFetch(`${CONFIG.apiBase}/api/v1/admin/accounts/${accountId}`, {
+      method: 'DELETE',
+      headers: { Accept: 'application/json, text/plain, */*' },
+    });
+
+    if (!resp.ok) {
+      const detail = await parseErrorResponse(resp);
+      return { ok: false, reason: `HTTP ${resp.status}${detail ? `，${detail}` : ''}` };
+    }
+
+    const json = await resp.json();
+    if (json.code !== 0) {
+      return { ok: false, reason: json.message || `code=${json.code}` };
+    }
+    return { ok: true, data: json.data };
+  }
+
   function resetStats() {
     state.stats = {
       total: 0,
@@ -815,6 +930,7 @@
       ok: 0,
       enabled: 0,
       disabled: 0,
+      deleted: 0,
       skipped: 0,
       failed: 0,
     };
@@ -934,6 +1050,18 @@
         }
       } else {
         state.stats.failed += 1;
+        if (state.autoDeleteInvalidAuth && isInvalidatedAuthError(failReason)) {
+          log(`${title} 认证 token 已失效，准备删除账号`, 'error');
+          const deleted = await deleteAccount(account.id);
+          if (deleted.ok) {
+            state.stats.deleted += 1;
+            log(`${title} 已删除（原因：${failReason}）`, 'success');
+          } else {
+            log(`${title} 删除失败：${deleted.reason}`, 'error');
+          }
+          return;
+        }
+
         if (!state.autoDisable) {
           log(`${title} 检测到异常但未关闭 schedulable（原因：${failReason}）`, 'warn');
           return;
