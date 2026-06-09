@@ -20,6 +20,7 @@ import (
 )
 
 const codexImportClockSkewSeconds int64 = 120
+const adminAccountCreateBatchSize = 500
 
 type CodexSessionImportRequest struct {
 	Content                 string                     `json:"content"`
@@ -116,6 +117,13 @@ type codexAccountIndex struct {
 	accountsByKey map[string]service.Account
 }
 
+type pendingCodexCreate struct {
+	itemPosition int
+	index        int
+	name         string
+	input        *service.CreateAccountInput
+}
+
 func (h *AccountHandler) ImportCodexSession(c *gin.Context) {
 	var req CodexSessionImportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -185,6 +193,7 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 	}
 	skipMixedChannelCheck := req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk
 
+	pendingCreates := make([]pendingCodexCreate, 0, len(entries))
 	seenIdentity := map[string]int{}
 	for _, entry := range entries {
 		item, err := normalizeCodexImportEntry(entry)
@@ -305,7 +314,7 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 			continue
 		}
 
-		account, createErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
+		createInput := &service.CreateAccountInput{
 			Name:                  accountName,
 			Notes:                 req.Notes,
 			Platform:              service.PlatformOpenAI,
@@ -322,36 +331,82 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 			AutoPauseOnExpired:    autoPauseOnExpired,
 			SkipDefaultGroupBind:  skipDefaultGroupBind,
 			SkipMixedChannelCheck: skipMixedChannelCheck,
-		})
-		if createErr != nil {
-			result.Failed++
-			result.Items = append(result.Items, CodexSessionImportItem{
-				Index:   entry.Index,
-				Name:    accountName,
-				Action:  "failed",
-				Message: createErr.Error(),
-			})
-			result.Errors = append(result.Errors, CodexSessionImportMessage{
-				Index:   entry.Index,
-				Name:    accountName,
-				Message: createErr.Error(),
-			})
-			continue
-		}
-		if account != nil {
-			index.Add(*account)
-		}
-		result.Created++
-		accountID := int64(0)
-		if account != nil {
-			accountID = account.ID
 		}
 		result.Items = append(result.Items, CodexSessionImportItem{
-			Index:     entry.Index,
-			Name:      accountName,
-			Action:    "created",
-			AccountID: accountID,
+			Index:  entry.Index,
+			Name:   accountName,
+			Action: "pending",
 		})
+		pendingCreates = append(pendingCreates, pendingCodexCreate{
+			itemPosition: len(result.Items) - 1,
+			index:        entry.Index,
+			name:         accountName,
+			input:        createInput,
+		})
+	}
+
+	if len(pendingCreates) > 0 {
+		for start := 0; start < len(pendingCreates); start += adminAccountCreateBatchSize {
+			end := start + adminAccountCreateBatchSize
+			if end > len(pendingCreates) {
+				end = len(pendingCreates)
+			}
+			chunk := pendingCreates[start:end]
+			createInputs := make([]*service.CreateAccountInput, 0, len(chunk))
+			for _, pending := range chunk {
+				createInputs = append(createInputs, pending.input)
+			}
+			accounts, createErr := h.adminService.CreateAccounts(ctx, createInputs)
+			if createErr != nil {
+				for _, pending := range chunk {
+					result.Failed++
+					result.Items[pending.itemPosition].Action = "failed"
+					result.Items[pending.itemPosition].Message = createErr.Error()
+					result.Errors = append(result.Errors, CodexSessionImportMessage{
+						Index:   pending.index,
+						Name:    pending.name,
+						Message: createErr.Error(),
+					})
+				}
+				continue
+			}
+
+			for i, pending := range chunk {
+				accountID := int64(0)
+				if i < len(accounts) && accounts[i] != nil {
+					accountID = accounts[i].ID
+					index.Add(*accounts[i])
+				}
+				if accountID == 0 {
+					message := "account creation returned empty result"
+					result.Failed++
+					result.Items[pending.itemPosition].Action = "failed"
+					result.Items[pending.itemPosition].Message = message
+					result.Errors = append(result.Errors, CodexSessionImportMessage{
+						Index:   pending.index,
+						Name:    pending.name,
+						Message: message,
+					})
+					continue
+				}
+				result.Created++
+				result.Items[pending.itemPosition].Action = "created"
+				result.Items[pending.itemPosition].AccountID = accountID
+			}
+		}
+		for _, pending := range pendingCreates {
+			if result.Items[pending.itemPosition].Action == "pending" {
+				message := "account creation returned empty result"
+				result.Failed++
+				result.Items[pending.itemPosition].Action = "failed"
+				result.Items[pending.itemPosition].Message = message
+				result.Errors = append(result.Errors, CodexSessionImportMessage{
+					Index:   pending.index,
+					Name:    pending.name,
+					Message: message,
+				})
+			}
+		}
 	}
 
 	return result, nil

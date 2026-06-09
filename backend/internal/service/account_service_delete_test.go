@@ -36,6 +36,10 @@ func (s *accountRepoStub) Create(ctx context.Context, account *Account) error {
 	panic("unexpected Create call")
 }
 
+func (s *accountRepoStub) CreateBatch(ctx context.Context, accounts []*Account) error {
+	panic("unexpected CreateBatch call")
+}
+
 func (s *accountRepoStub) GetByID(ctx context.Context, id int64) (*Account, error) {
 	panic("unexpected GetByID call")
 }

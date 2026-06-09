@@ -1,13 +1,79 @@
 package admin
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/service"
 )
+
+func TestImportCodexSessionsCreatesNewAccountsInBatch(t *testing.T) {
+	adminSvc := newStubAdminService()
+	adminSvc.accounts = nil
+	handler := &AccountHandler{adminService: adminSvc}
+
+	token1 := buildCodexImportTestJWT(t, time.Now().Add(time.Hour), map[string]any{
+		"email": "batch-a@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acct-batch-a",
+			"chatgpt_user_id":    "user-batch-a",
+		},
+	})
+	token2 := buildCodexImportTestJWT(t, time.Now().Add(time.Hour), map[string]any{
+		"email": "batch-b@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acct-batch-b",
+			"chatgpt_user_id":    "user-batch-b",
+		},
+	})
+	req := CodexSessionImportRequest{
+		Contents: []string{
+			fmt.Sprintf(`{"type":"codex","email":"batch-a@example.com","access_token":%q,"refresh_token":"refresh-a"}`, token1),
+			fmt.Sprintf(`{"type":"codex","email":"batch-b@example.com","access_token":%q,"refresh_token":"refresh-b"}`, token2),
+		},
+		GroupIDs: []int64{3},
+	}
+
+	entries, err := parseCodexSessionImportEntries(req)
+	if err != nil {
+		t.Fatalf("parseCodexSessionImportEntries error = %v", err)
+	}
+	result, err := handler.importCodexSessions(context.Background(), req, entries)
+	if err != nil {
+		t.Fatalf("importCodexSessions error = %v", err)
+	}
+
+	if result.Created != 2 || result.Failed != 0 {
+		t.Fatalf("created=%d failed=%d, want created=2 failed=0; result=%#v", result.Created, result.Failed, result)
+	}
+	if adminSvc.createAccountCalls != 0 {
+		t.Fatalf("CreateAccount calls = %d, want 0", adminSvc.createAccountCalls)
+	}
+	if adminSvc.createAccountsCalls != 1 {
+		t.Fatalf("CreateAccounts calls = %d, want 1", adminSvc.createAccountsCalls)
+	}
+	if len(adminSvc.createdAccounts) != 2 {
+		t.Fatalf("createdAccounts len = %d, want 2", len(adminSvc.createdAccounts))
+	}
+	for i, input := range adminSvc.createdAccounts {
+		if input.Platform != service.PlatformOpenAI || input.Type != service.AccountTypeOAuth {
+			t.Fatalf("input[%d] platform/type = %s/%s", i, input.Platform, input.Type)
+		}
+		if len(input.GroupIDs) != 1 || input.GroupIDs[0] != 3 {
+			t.Fatalf("input[%d] groupIDs = %#v, want [3]", i, input.GroupIDs)
+		}
+	}
+	for _, item := range result.Items {
+		if item.Action != "created" || item.AccountID == 0 {
+			t.Fatalf("result item = %#v, want created with account id", item)
+		}
+	}
+}
 
 func TestParseCodexSessionImportEntriesSupportsRawTokenJSONAndArray(t *testing.T) {
 	token1 := "raw-access-token-1"

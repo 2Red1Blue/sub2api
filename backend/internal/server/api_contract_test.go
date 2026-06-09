@@ -1633,6 +1633,10 @@ func (s *stubAccountRepo) Create(ctx context.Context, account *service.Account) 
 	return errors.New("not implemented")
 }
 
+func (s *stubAccountRepo) CreateBatch(ctx context.Context, accounts []*service.Account) error {
+	return errors.New("not implemented")
+}
+
 func (s *stubAccountRepo) GetByID(ctx context.Context, id int64) (*service.Account, error) {
 	return nil, service.ErrAccountNotFound
 }

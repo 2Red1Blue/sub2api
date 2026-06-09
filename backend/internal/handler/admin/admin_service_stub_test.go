@@ -26,6 +26,8 @@ type stubAdminService struct {
 	testedProxyIDs       []int64
 	getUserErr           error
 	createAccountErr     error
+	createAccountCalls   int
+	createAccountsCalls  int
 	updateAccountErr     error
 	bulkUpdateAccountErr error
 	checkMixedErr        error
@@ -344,12 +346,41 @@ func (s *stubAdminService) GetAccountsByIDs(ctx context.Context, ids []int64) ([
 func (s *stubAdminService) CreateAccount(ctx context.Context, input *service.CreateAccountInput) (*service.Account, error) {
 	s.mu.Lock()
 	s.createdAccounts = append(s.createdAccounts, input)
+	s.createAccountCalls++
 	s.mu.Unlock()
 	if s.createAccountErr != nil {
 		return nil, s.createAccountErr
 	}
 	account := service.Account{ID: 300, Name: input.Name, Status: service.StatusActive}
 	return &account, nil
+}
+
+func (s *stubAdminService) CreateAccounts(ctx context.Context, inputs []*service.CreateAccountInput) ([]*service.Account, error) {
+	s.mu.Lock()
+	s.createdAccounts = append(s.createdAccounts, inputs...)
+	s.createAccountsCalls++
+	s.mu.Unlock()
+	if s.createAccountErr != nil {
+		return nil, s.createAccountErr
+	}
+	accounts := make([]*service.Account, 0, len(inputs))
+	for i, input := range inputs {
+		if input == nil {
+			accounts = append(accounts, nil)
+			continue
+		}
+		account := service.Account{
+			ID:        int64(300 + i),
+			Name:      input.Name,
+			Platform:  input.Platform,
+			Type:      input.Type,
+			Status:    service.StatusActive,
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		}
+		accounts = append(accounts, &account)
+	}
+	return accounts, nil
 }
 
 func (s *stubAdminService) UpdateAccount(ctx context.Context, id int64, input *service.UpdateAccountInput) (*service.Account, error) {

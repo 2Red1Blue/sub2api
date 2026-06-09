@@ -124,6 +124,85 @@ func (s *AccountRepoSuite) TestCreate() {
 	s.Require().Equal("test-create", got.Name)
 }
 
+func TestAccountRepository_CreateBatch_PersistsAccountsAndEnqueuesBulkOutbox(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := newAccountRepositoryWithSQL(client, integrationDB, nil)
+	prefix := uniqueTestValue(t, "batch-create")
+	rateMultiplier := 1.25
+	loadFactor := 80
+	accounts := []*service.Account{
+		{
+			Name:           prefix + "-1",
+			Platform:       service.PlatformOpenAI,
+			Type:           service.AccountTypeOAuth,
+			Status:         service.StatusActive,
+			Credentials:    map[string]any{"access_token": "token-1"},
+			Extra:          map[string]any{"email": "batch-1@example.com"},
+			Concurrency:    10,
+			Priority:       50,
+			Schedulable:    true,
+			RateMultiplier: &rateMultiplier,
+			LoadFactor:     &loadFactor,
+		},
+		{
+			Name:        prefix + "-2",
+			Platform:    service.PlatformOpenAI,
+			Type:        service.AccountTypeOAuth,
+			Status:      service.StatusActive,
+			Credentials: map[string]any{"access_token": "token-2"},
+			Extra:       map[string]any{"email": "batch-2@example.com"},
+			Concurrency: 10,
+			Priority:    50,
+			Schedulable: true,
+		},
+	}
+
+	err := repo.CreateBatch(ctx, accounts)
+	require.NoError(t, err)
+	require.NotZero(t, accounts[0].ID)
+	require.NotZero(t, accounts[1].ID)
+	require.NotZero(t, accounts[0].CreatedAt)
+	require.NotZero(t, accounts[1].UpdatedAt)
+	t.Cleanup(func() {
+		_, _ = integrationDB.ExecContext(
+			context.Background(),
+			`DELETE FROM scheduler_outbox
+			  WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(payload->'account_ids') AS account_id WHERE account_id = $1)
+			     OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(payload->'account_ids') AS account_id WHERE account_id = $2)`,
+			strconv.FormatInt(accounts[0].ID, 10),
+			strconv.FormatInt(accounts[1].ID, 10),
+		)
+		_, _ = integrationDB.ExecContext(context.Background(), "DELETE FROM accounts WHERE id = ANY($1)", pq.Array([]int64{accounts[0].ID, accounts[1].ID}))
+	})
+
+	got, err := repo.GetByIDs(ctx, []int64{accounts[0].ID, accounts[1].ID})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, prefix+"-1", got[0].Name)
+	require.Equal(t, prefix+"-2", got[1].Name)
+
+	var eventType string
+	var payloadBytes []byte
+	err = integrationDB.QueryRowContext(
+		ctx,
+		`SELECT event_type, payload
+		   FROM scheduler_outbox
+		  WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(payload->'account_ids') AS account_id WHERE account_id = $1)
+		    AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(payload->'account_ids') AS account_id WHERE account_id = $2)
+		  ORDER BY id DESC
+		  LIMIT 1`,
+		strconv.FormatInt(accounts[0].ID, 10),
+		strconv.FormatInt(accounts[1].ID, 10),
+	).Scan(&eventType, &payloadBytes)
+	require.NoError(t, err)
+	require.Equal(t, service.SchedulerOutboxEventAccountBulkChanged, eventType)
+
+	var payload map[string][]int64
+	require.NoError(t, json.Unmarshal(payloadBytes, &payload))
+	require.ElementsMatch(t, []int64{accounts[0].ID, accounts[1].ID}, payload["account_ids"])
+}
+
 func (s *AccountRepoSuite) TestGetByID_NotFound() {
 	_, err := s.repo.GetByID(s.ctx, 999999)
 	s.Require().Error(err, "expected error for non-existent ID")

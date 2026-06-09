@@ -67,6 +67,8 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	"session_window_utilization": {},
 }
 
+const accountCreateBatchSize = 500
+
 // NewAccountRepository 创建账户仓储实例。
 // 这是对外暴露的构造函数，返回接口类型以便于依赖注入。
 func NewAccountRepository(client *dbent.Client, sqlDB *sql.DB, schedulerCache service.SchedulerCache) service.AccountRepository {
@@ -151,6 +153,98 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue account create failed: account=%d err=%v", account.ID, err)
 	}
 	return nil
+}
+
+func (r *accountRepository) CreateBatch(ctx context.Context, accounts []*service.Account) error {
+	accounts = compactAccountInputs(accounts)
+	if len(accounts) == 0 {
+		return nil
+	}
+
+	accountIDs := make([]int64, 0, len(accounts))
+	for start := 0; start < len(accounts); start += accountCreateBatchSize {
+		end := start + accountCreateBatchSize
+		if end > len(accounts) {
+			end = len(accounts)
+		}
+		chunk := accounts[start:end]
+		builders := make([]*dbent.AccountCreate, 0, len(chunk))
+		for _, account := range chunk {
+			builders = append(builders, r.buildAccountCreate(account))
+		}
+
+		created, err := r.client.Account.CreateBulk(builders...).Save(ctx)
+		if err != nil {
+			return translatePersistenceError(err, service.ErrAccountNotFound, nil)
+		}
+		for i, createdAccount := range created {
+			if createdAccount == nil {
+				continue
+			}
+			chunk[i].ID = createdAccount.ID
+			chunk[i].CreatedAt = createdAccount.CreatedAt
+			chunk[i].UpdatedAt = createdAccount.UpdatedAt
+			accountIDs = append(accountIDs, createdAccount.ID)
+		}
+	}
+	if len(accountIDs) > 0 {
+		payload := map[string]any{"account_ids": accountIDs}
+		if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountBulkChanged, nil, nil, payload); err != nil {
+			logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue account batch create failed: count=%d err=%v", len(accountIDs), err)
+		}
+	}
+	return nil
+}
+
+func (r *accountRepository) buildAccountCreate(account *service.Account) *dbent.AccountCreate {
+	builder := r.client.Account.Create().
+		SetName(account.Name).
+		SetNillableNotes(account.Notes).
+		SetPlatform(account.Platform).
+		SetType(account.Type).
+		SetCredentials(normalizeJSONMap(account.Credentials)).
+		SetExtra(normalizeJSONMap(account.Extra)).
+		SetConcurrency(account.Concurrency).
+		SetPriority(account.Priority).
+		SetStatus(account.Status).
+		SetErrorMessage(account.ErrorMessage).
+		SetSchedulable(account.Schedulable).
+		SetAutoPauseOnExpired(account.AutoPauseOnExpired)
+
+	if account.RateMultiplier != nil {
+		builder.SetRateMultiplier(*account.RateMultiplier)
+	}
+	if account.LoadFactor != nil {
+		builder.SetLoadFactor(*account.LoadFactor)
+	}
+	if account.ProxyID != nil {
+		builder.SetProxyID(*account.ProxyID)
+	}
+	if account.LastUsedAt != nil {
+		builder.SetLastUsedAt(*account.LastUsedAt)
+	}
+	if account.ExpiresAt != nil {
+		builder.SetExpiresAt(*account.ExpiresAt)
+	}
+	if account.RateLimitedAt != nil {
+		builder.SetRateLimitedAt(*account.RateLimitedAt)
+	}
+	if account.RateLimitResetAt != nil {
+		builder.SetRateLimitResetAt(*account.RateLimitResetAt)
+	}
+	if account.OverloadUntil != nil {
+		builder.SetOverloadUntil(*account.OverloadUntil)
+	}
+	if account.SessionWindowStart != nil {
+		builder.SetSessionWindowStart(*account.SessionWindowStart)
+	}
+	if account.SessionWindowEnd != nil {
+		builder.SetSessionWindowEnd(*account.SessionWindowEnd)
+	}
+	if account.SessionWindowStatus != "" {
+		builder.SetSessionWindowStatus(account.SessionWindowStatus)
+	}
+	return builder
 }
 
 func (r *accountRepository) GetByID(ctx context.Context, id int64) (*service.Account, error) {
@@ -1846,6 +1940,16 @@ func uniquePositiveInt64s(ids []int64) []int64 {
 		}
 		seen[id] = struct{}{}
 		out = append(out, id)
+	}
+	return out
+}
+
+func compactAccountInputs(accounts []*service.Account) []*service.Account {
+	out := make([]*service.Account, 0, len(accounts))
+	for _, account := range accounts {
+		if account != nil {
+			out = append(out, account)
+		}
 	}
 	return out
 }

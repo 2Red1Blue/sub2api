@@ -77,6 +77,7 @@ type AdminService interface {
 	GetAccount(ctx context.Context, id int64) (*Account, error)
 	GetAccountsByIDs(ctx context.Context, ids []int64) ([]*Account, error)
 	CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error)
+	CreateAccounts(ctx context.Context, inputs []*CreateAccountInput) ([]*Account, error)
 	UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error)
 	// UpdateAccountExtra 仅对 Extra 做 JSONB 增量合并（key 级覆盖），不会影响其它字段或运行态键。
 	// 用于刷新流程持久化 account_uuid / org_uuid 等少量键，避免被全量快照覆盖。
@@ -2583,6 +2584,112 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		}
 	}
 
+	account, err := buildCreateAccountFromInput(input)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.accountRepo.Create(ctx, account); err != nil {
+		return nil, err
+	}
+
+	// 绑定分组
+	if len(groupIDs) > 0 {
+		if err := s.accountRepo.BindGroups(ctx, account.ID, groupIDs); err != nil {
+			return nil, err
+		}
+	}
+
+	// OAuth 账号：创建后异步设置隐私。
+	// 使用 Ensure（幂等）而非 Force：新建账号 Extra 为空时效果相同，但更安全。
+	s.scheduleAccountPrivacyEnsure(account)
+
+	return account, nil
+}
+
+func (s *adminServiceImpl) CreateAccounts(ctx context.Context, inputs []*CreateAccountInput) ([]*Account, error) {
+	inputs = compactCreateAccountInputs(inputs)
+	if len(inputs) == 0 {
+		return []*Account{}, nil
+	}
+
+	defaultGroupsByPlatform := map[string][]int64{}
+	accounts := make([]*Account, 0, len(inputs))
+	groupIDsByAccountIndex := make([][]int64, len(inputs))
+	for i, input := range inputs {
+		groupIDs := append([]int64(nil), input.GroupIDs...)
+		if len(groupIDs) == 0 && !input.SkipDefaultGroupBind {
+			if cached, ok := defaultGroupsByPlatform[input.Platform]; ok {
+				groupIDs = cached
+			} else {
+				groupIDs = s.resolveDefaultGroupIDs(ctx, input.Platform)
+				defaultGroupsByPlatform[input.Platform] = groupIDs
+			}
+		}
+
+		if len(groupIDs) > 0 && !input.SkipMixedChannelCheck {
+			if err := s.checkMixedChannelRisk(ctx, 0, input.Platform, groupIDs); err != nil {
+				return nil, err
+			}
+		}
+
+		account, err := buildCreateAccountFromInput(input)
+		if err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, account)
+		groupIDsByAccountIndex[i] = groupIDs
+	}
+
+	if err := s.accountRepo.CreateBatch(ctx, accounts); err != nil {
+		return nil, err
+	}
+
+	groupBatches := make(map[string]struct {
+		accountIDs []int64
+		groupIDs   []int64
+	})
+	for i, account := range accounts {
+		if account == nil || len(groupIDsByAccountIndex[i]) == 0 {
+			continue
+		}
+		groupIDs := uniqueInt64Key(groupIDsByAccountIndex[i])
+		if len(groupIDs.ids) == 0 {
+			continue
+		}
+		batch := groupBatches[groupIDs.key]
+		if batch.groupIDs == nil {
+			batch.groupIDs = groupIDs.ids
+		}
+		batch.accountIDs = append(batch.accountIDs, account.ID)
+		groupBatches[groupIDs.key] = batch
+	}
+	for _, batch := range groupBatches {
+		if err := s.accountRepo.BindGroupsForAccounts(ctx, batch.accountIDs, batch.groupIDs); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, account := range accounts {
+		s.scheduleAccountPrivacyEnsure(account)
+	}
+	return accounts, nil
+}
+
+func (s *adminServiceImpl) resolveDefaultGroupIDs(ctx context.Context, platform string) []int64 {
+	defaultGroupName := platform + "-default"
+	groups, err := s.groupRepo.ListActiveByPlatform(ctx, platform)
+	if err != nil {
+		return nil
+	}
+	for _, g := range groups {
+		if g.Name == defaultGroupName {
+			return []int64{g.ID}
+		}
+	}
+	return nil
+}
+
+func buildCreateAccountFromInput(input *CreateAccountInput) (*Account, error) {
 	account := &Account{
 		Name:        input.Name,
 		Notes:       normalizeAccountNotes(input.Notes),
@@ -2625,43 +2732,69 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		}
 		account.LoadFactor = input.LoadFactor
 	}
-	if err := s.accountRepo.Create(ctx, account); err != nil {
-		return nil, err
-	}
-
-	// 绑定分组
-	if len(groupIDs) > 0 {
-		if err := s.accountRepo.BindGroups(ctx, account.ID, groupIDs); err != nil {
-			return nil, err
-		}
-	}
-
-	// OAuth 账号：创建后异步设置隐私。
-	// 使用 Ensure（幂等）而非 Force：新建账号 Extra 为空时效果相同，但更安全。
-	if account.Type == AccountTypeOAuth {
-		switch account.Platform {
-		case PlatformOpenAI:
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("create_account_openai_privacy_panic", "account_id", account.ID, "recover", r)
-					}
-				}()
-				s.EnsureOpenAIPrivacy(context.Background(), account)
-			}()
-		case PlatformAntigravity:
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("create_account_antigravity_privacy_panic", "account_id", account.ID, "recover", r)
-					}
-				}()
-				s.EnsureAntigravityPrivacy(context.Background(), account)
-			}()
-		}
-	}
-
 	return account, nil
+}
+
+func compactCreateAccountInputs(inputs []*CreateAccountInput) []*CreateAccountInput {
+	out := make([]*CreateAccountInput, 0, len(inputs))
+	for _, input := range inputs {
+		if input != nil {
+			out = append(out, input)
+		}
+	}
+	return out
+}
+
+type uniqueInt64Result struct {
+	key string
+	ids []int64
+}
+
+func uniqueInt64Key(ids []int64) uniqueInt64Result {
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+		parts = append(parts, strconv.FormatInt(id, 10))
+	}
+	return uniqueInt64Result{
+		key: strings.Join(parts, ","),
+		ids: out,
+	}
+}
+
+func (s *adminServiceImpl) scheduleAccountPrivacyEnsure(account *Account) {
+	if account == nil || account.Type != AccountTypeOAuth {
+		return
+	}
+	switch account.Platform {
+	case PlatformOpenAI:
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("create_account_openai_privacy_panic", "account_id", account.ID, "recover", r)
+				}
+			}()
+			s.EnsureOpenAIPrivacy(context.Background(), account)
+		}()
+	case PlatformAntigravity:
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("create_account_antigravity_privacy_panic", "account_id", account.ID, "recover", r)
+				}
+			}()
+			s.EnsureAntigravityPrivacy(context.Background(), account)
+		}()
+	}
 }
 
 func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {

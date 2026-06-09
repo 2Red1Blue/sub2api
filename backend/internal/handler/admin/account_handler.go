@@ -1327,6 +1327,11 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 		// 收集需要异步设置隐私的 OAuth 账号
 		var antigravityPrivacyAccounts []*service.Account
 		var openaiPrivacyAccounts []*service.Account
+		type pendingBatchCreate struct {
+			name  string
+			input *service.CreateAccountInput
+		}
+		pendingCreates := make([]pendingBatchCreate, 0, len(req.Accounts))
 
 		for _, item := range req.Accounts {
 			if item.RateMultiplier != nil && *item.RateMultiplier < 0 {
@@ -1344,48 +1349,83 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 
 			skipCheck := item.ConfirmMixedChannelRisk != nil && *item.ConfirmMixedChannelRisk
 
-			account, err := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
-				Name:                  item.Name,
-				Notes:                 item.Notes,
-				Platform:              item.Platform,
-				Type:                  item.Type,
-				Credentials:           item.Credentials,
-				Extra:                 item.Extra,
-				ProxyID:               item.ProxyID,
-				Concurrency:           item.Concurrency,
-				Priority:              item.Priority,
-				RateMultiplier:        item.RateMultiplier,
-				GroupIDs:              item.GroupIDs,
-				ExpiresAt:             item.ExpiresAt,
-				AutoPauseOnExpired:    item.AutoPauseOnExpired,
-				SkipMixedChannelCheck: skipCheck,
+			pendingCreates = append(pendingCreates, pendingBatchCreate{
+				name: item.Name,
+				input: &service.CreateAccountInput{
+					Name:                  item.Name,
+					Notes:                 item.Notes,
+					Platform:              item.Platform,
+					Type:                  item.Type,
+					Credentials:           item.Credentials,
+					Extra:                 item.Extra,
+					ProxyID:               item.ProxyID,
+					Concurrency:           item.Concurrency,
+					Priority:              item.Priority,
+					RateMultiplier:        item.RateMultiplier,
+					GroupIDs:              item.GroupIDs,
+					ExpiresAt:             item.ExpiresAt,
+					AutoPauseOnExpired:    item.AutoPauseOnExpired,
+					SkipMixedChannelCheck: skipCheck,
+				},
 			})
-			if err != nil {
-				failed++
-				results = append(results, gin.H{
-					"name":    item.Name,
-					"success": false,
-					"error":   err.Error(),
-				})
-				continue
-			}
-			// 收集需要异步设置隐私的 OAuth 账号
-			if account.Type == service.AccountTypeOAuth {
-				switch account.Platform {
-				case service.PlatformAntigravity:
-					antigravityPrivacyAccounts = append(antigravityPrivacyAccounts, account)
-				case service.PlatformOpenAI:
-					openaiPrivacyAccounts = append(openaiPrivacyAccounts, account)
+		}
+
+		if len(pendingCreates) > 0 {
+			for start := 0; start < len(pendingCreates); start += adminAccountCreateBatchSize {
+				end := start + adminAccountCreateBatchSize
+				if end > len(pendingCreates) {
+					end = len(pendingCreates)
+				}
+				chunk := pendingCreates[start:end]
+				createInputs := make([]*service.CreateAccountInput, 0, len(chunk))
+				for _, pending := range chunk {
+					createInputs = append(createInputs, pending.input)
+				}
+				accounts, err := h.adminService.CreateAccounts(ctx, createInputs)
+				if err != nil {
+					for _, pending := range chunk {
+						failed++
+						results = append(results, gin.H{
+							"name":    pending.name,
+							"success": false,
+							"error":   err.Error(),
+						})
+					}
+					continue
+				}
+				for i, pending := range chunk {
+					var account *service.Account
+					if i < len(accounts) {
+						account = accounts[i]
+					}
+					if account == nil {
+						failed++
+						results = append(results, gin.H{
+							"name":    pending.name,
+							"success": false,
+							"error":   "account creation returned empty result",
+						})
+						continue
+					}
+					// 收集需要异步设置隐私的 OAuth 账号
+					if account.Type == service.AccountTypeOAuth {
+						switch account.Platform {
+						case service.PlatformAntigravity:
+							antigravityPrivacyAccounts = append(antigravityPrivacyAccounts, account)
+						case service.PlatformOpenAI:
+							openaiPrivacyAccounts = append(openaiPrivacyAccounts, account)
+						}
+					}
+					// OpenAI APIKey 账号异步探测 /v1/responses 能力。
+					h.scheduleOpenAIResponsesProbe(account)
+					success++
+					results = append(results, gin.H{
+						"name":    pending.name,
+						"id":      account.ID,
+						"success": true,
+					})
 				}
 			}
-			// OpenAI APIKey 账号异步探测 /v1/responses 能力。
-			h.scheduleOpenAIResponsesProbe(account)
-			success++
-			results = append(results, gin.H{
-				"name":    item.Name,
-				"id":      account.ID,
-				"success": true,
-			})
 		}
 
 		// 异步设置隐私，避免批量创建时阻塞请求
