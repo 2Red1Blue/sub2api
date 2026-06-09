@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sub2API 账号模型巡检并自动下线
 // @namespace    https://sinry.example
-// @version      0.1.2
+// @version      0.1.3
 // @description  按当前页面分组批量测试账号模型；任一模型异常时自动关闭账号 schedulable；已关闭调度账号跳过
 // @match        http://127.0.0.1:18080/admin/accounts*
 // @run-at       document-start
@@ -31,6 +31,8 @@
     currentGroupStorageKey: '__sub2api_checker_current_group__',
     autoDisableStorageKey: '__sub2api_checker_auto_disable__',
   };
+
+  const groupIDCache = new Map();
 
   function getCachedAuthToken() {
     const raw =
@@ -657,7 +659,63 @@
     return resp;
   }
 
+  async function parseErrorResponse(resp) {
+    try {
+      const text = await resp.text();
+      if (!text) return '';
+      return text.slice(0, 500);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function normalizeGroupNameKey(group) {
+    return normalizeGroup(group).toLowerCase();
+  }
+
+  async function resolveGroupFilterValue(group) {
+    const normalized = normalizeGroup(group);
+    if (!normalized) return '';
+    if (normalized === 'ungrouped' || /^\d+$/.test(normalized)) return normalized;
+
+    const cacheKey = normalizeGroupNameKey(normalized);
+    if (groupIDCache.has(cacheKey)) return groupIDCache.get(cacheKey);
+
+    const resp = await apiFetch(`${CONFIG.apiBase}/api/v1/admin/groups/all`, {
+      headers: { Accept: 'application/json, text/plain, */*' },
+    });
+    if (!resp.ok) {
+      const detail = await parseErrorResponse(resp);
+      throw new Error(`分组列表请求失败：HTTP ${resp.status}${detail ? `，${detail}` : ''}`);
+    }
+
+    const json = await resp.json();
+    if (json.code !== 0) {
+      throw new Error(`分组列表返回异常：${json.message || json.code}`);
+    }
+
+    const groups = Array.isArray(json.data) ? json.data : [];
+    for (const item of groups) {
+      const nameKey = normalizeGroupNameKey(item?.name);
+      const id = item?.id;
+      if (!nameKey || id === undefined || id === null) continue;
+      groupIDCache.set(nameKey, String(id));
+    }
+
+    const resolved = groupIDCache.get(cacheKey);
+    if (!resolved) {
+      throw new Error(`没有找到名为 ${normalized} 的分组，请填写分组 ID 或确认分组名称`);
+    }
+
+    return resolved;
+  }
+
   async function fetchAccounts() {
+    const groupFilter = await resolveGroupFilterValue(state.currentGroup);
+    if (groupFilter !== state.currentGroup) {
+      log(`分组 ${state.currentGroup} 已解析为 ID ${groupFilter}`, 'success');
+    }
+
     let page = 1;
     const items = [];
     while (true) {
@@ -668,14 +726,17 @@
       url.searchParams.set('type', '');
       url.searchParams.set('status', '');
       url.searchParams.set('privacy_mode', '');
-      url.searchParams.set('group', state.currentGroup);
+      url.searchParams.set('group', groupFilter);
       url.searchParams.set('search', '');
       url.searchParams.set('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai');
 
       const resp = await apiFetch(url.toString(), {
         headers: { Accept: 'application/json, text/plain, */*' },
       });
-      if (!resp.ok) throw new Error(`账号列表请求失败：HTTP ${resp.status}`);
+      if (!resp.ok) {
+        const detail = await parseErrorResponse(resp);
+        throw new Error(`账号列表请求失败：HTTP ${resp.status}${detail ? `，${detail}` : ''}`);
+      }
       const json = await resp.json();
       if (json.code !== 0) throw new Error(`账号列表返回异常：${json.message || json.code}`);
 
