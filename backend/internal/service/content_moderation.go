@@ -303,6 +303,7 @@ type ContentModerationCheckInput struct {
 	Model      string
 	Protocol   string
 	Body       []byte
+	DebugLog   bool
 }
 
 type ContentModerationInput struct {
@@ -757,8 +758,9 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 
 func (s *ContentModerationService) Check(ctx context.Context, input ContentModerationCheckInput) (*ContentModerationDecision, error) {
 	allow := &ContentModerationDecision{Allowed: true, Action: ContentModerationActionAllow}
+	debugLog := input.DebugLog
 	if s == nil || s.settingRepo == nil || s.repo == nil {
-		slog.Info("content_moderation.skip_unavailable",
+		contentModerationDebugInfo(debugLog, "content_moderation.skip_unavailable",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -767,7 +769,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		return allow, nil
 	}
 	if !s.isRiskControlEnabled(ctx) {
-		slog.Info("content_moderation.skip_feature_disabled",
+		contentModerationDebugInfo(debugLog, "content_moderation.skip_feature_disabled",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -788,7 +790,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 	}
 	inGroupScope := cfg.includesGroup(input.GroupID)
 	inModelScope := cfg.includesModel(input.Model)
-	slog.Info("content_moderation.config_loaded",
+	contentModerationDebugInfo(debugLog, "content_moderation.config_loaded",
 		"user_id", input.UserID,
 		"api_key_id", input.APIKeyID,
 		"group_id", contentModerationLogGroupID(input.GroupID),
@@ -810,7 +812,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		"pre_hash_check_enabled", cfg.PreHashCheckEnabled,
 		"record_non_hits", cfg.RecordNonHits)
 	if !cfg.Enabled {
-		slog.Info("content_moderation.skip_config_disabled",
+		contentModerationDebugInfo(debugLog, "content_moderation.skip_config_disabled",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -819,7 +821,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		return allow, nil
 	}
 	if cfg.Mode == ContentModerationModeOff {
-		slog.Info("content_moderation.skip_mode_off",
+		contentModerationDebugInfo(debugLog, "content_moderation.skip_mode_off",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -828,7 +830,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		return allow, nil
 	}
 	if !inGroupScope {
-		slog.Info("content_moderation.skip_group_out_of_scope",
+		contentModerationDebugInfo(debugLog, "content_moderation.skip_group_out_of_scope",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -840,7 +842,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		return allow, nil
 	}
 	if !inModelScope {
-		slog.Info("content_moderation.skip_model_out_of_scope",
+		contentModerationDebugInfo(debugLog, "content_moderation.skip_model_out_of_scope",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -854,7 +856,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 	}
 	content := ExtractContentModerationInput(input.Protocol, input.Body)
 	if content.IsEmpty() {
-		slog.Info("content_moderation.skip_empty_input",
+		contentModerationDebugInfo(debugLog, "content_moderation.skip_empty_input",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -864,7 +866,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		return allow, nil
 	}
 	content.Normalize()
-	slog.Info("content_moderation.input_extracted",
+	contentModerationDebugInfo(debugLog, "content_moderation.input_extracted",
 		"user_id", input.UserID,
 		"api_key_id", input.APIKeyID,
 		"group_id", contentModerationLogGroupID(input.GroupID),
@@ -877,7 +879,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		if cfg.KeywordBlockingMode != ContentModerationKeywordModeAPIOnly && len(cfg.BlockedKeywords) > 0 {
 			if keyword, hit := matchBlockedKeyword(content.Text, cfg.BlockedKeywords); hit {
 				s.recordPreBlockSyncMetric(0, ContentModerationActionKeywordBlock)
-				slog.Info("content_moderation.keyword_block",
+				contentModerationDebugInfo(debugLog, "content_moderation.keyword_block",
 					"user_id", input.UserID,
 					"api_key_id", input.APIKeyID,
 					"group_id", contentModerationLogGroupID(input.GroupID),
@@ -903,7 +905,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		}
 		if cfg.KeywordBlockingMode == ContentModerationKeywordModeKeywordOnly {
 			s.recordPreBlockSyncMetric(0, ContentModerationActionAllow)
-			slog.Info("content_moderation.skip_api_keyword_only",
+			contentModerationDebugInfo(debugLog, "content_moderation.skip_api_keyword_only",
 				"user_id", input.UserID,
 				"api_key_id", input.APIKeyID,
 				"group_id", contentModerationLogGroupID(input.GroupID),
@@ -921,7 +923,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			if cfg.Mode == ContentModerationModePreBlock {
 				s.recordPreBlockSyncMetric(0, ContentModerationActionHashBlock)
 			}
-			slog.Info("content_moderation.hash_block",
+			contentModerationDebugInfo(debugLog, "content_moderation.hash_block",
 				"user_id", input.UserID,
 				"api_key_id", input.APIKeyID,
 				"group_id", contentModerationLogGroupID(input.GroupID),
@@ -950,7 +952,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		if cfg.Mode == ContentModerationModePreBlock {
 			s.recordPreBlockSyncMetric(0, ContentModerationActionAllow)
 		}
-		slog.Info("content_moderation.skip_sample_rate",
+		contentModerationDebugInfo(debugLog, "content_moderation.skip_sample_rate",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -972,7 +974,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		return allow, nil
 	}
 	if cfg.Mode == ContentModerationModeObserve {
-		slog.Info("content_moderation.enqueue_observe",
+		contentModerationDebugInfo(debugLog, "content_moderation.enqueue_observe",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -984,6 +986,12 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 	}
 
 	return s.checkSync(ctx, input, cfg, content, hashText, nil, true), nil
+}
+
+func contentModerationDebugInfo(enabled bool, msg string, args ...any) {
+	if enabled {
+		slog.Info(msg, args...)
+	}
 }
 
 func (s *ContentModerationService) checkSync(ctx context.Context, input ContentModerationCheckInput, cfg *ContentModerationConfig, content ContentModerationInput, hashText string, queueDelay *int, allowBlock bool) *ContentModerationDecision {
@@ -1031,7 +1039,7 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 	if trackPreBlock {
 		s.recordPreBlockSyncMetric(latency, action)
 	}
-	slog.Info("content_moderation.audit_result",
+	contentModerationDebugInfo(input.DebugLog, "content_moderation.audit_result",
 		"user_id", input.UserID,
 		"api_key_id", input.APIKeyID,
 		"group_id", contentModerationLogGroupID(input.GroupID),

@@ -43,6 +43,7 @@ func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.Conte
 	}
 	input := buildContentModerationInput(c, apiKey, subject, protocol, model, body)
 	debugLogging := reqLog != nil && svc.GatewayDebugLoggingEnabled(c.Request.Context())
+	input.DebugLog = debugLogging
 	if debugLogging {
 		reqLog.Info("content_moderation.gateway_check_start",
 			zap.String("request_id", input.RequestID),
