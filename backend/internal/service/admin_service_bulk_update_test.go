@@ -14,10 +14,15 @@ import (
 
 type accountRepoStubForBulkUpdate struct {
 	accountRepoStub
-	bulkUpdateErr    error
-	bulkUpdateIDs    []int64
-	bindGroupErrByID map[int64]error
-	bindGroupsCalls  []int64
+	bulkUpdateErr   error
+	bulkUpdateIDs   []int64
+	bindGroupsErr   error
+	bindGroupsCalls []int64
+	bindGroupsBatch struct {
+		accountIDs []int64
+		groupIDs   []int64
+		called     bool
+	}
 	getByIDsAccounts []*Account
 	getByIDsErr      error
 	getByIDsCalled   bool
@@ -52,10 +57,14 @@ func (s *accountRepoStubForBulkUpdate) BulkUpdate(_ context.Context, ids []int64
 
 func (s *accountRepoStubForBulkUpdate) BindGroups(_ context.Context, accountID int64, _ []int64) error {
 	s.bindGroupsCalls = append(s.bindGroupsCalls, accountID)
-	if err, ok := s.bindGroupErrByID[accountID]; ok {
-		return err
-	}
 	return nil
+}
+
+func (s *accountRepoStubForBulkUpdate) BindGroupsForAccounts(_ context.Context, accountIDs []int64, groupIDs []int64) error {
+	s.bindGroupsBatch.called = true
+	s.bindGroupsBatch.accountIDs = append([]int64(nil), accountIDs...)
+	s.bindGroupsBatch.groupIDs = append([]int64(nil), groupIDs...)
+	return s.bindGroupsErr
 }
 
 func (s *accountRepoStubForBulkUpdate) GetByIDs(_ context.Context, ids []int64) ([]*Account, error) {
@@ -129,9 +138,7 @@ func TestAdminService_BulkUpdateAccounts_AllSuccessIDs(t *testing.T) {
 // TestAdminService_BulkUpdateAccounts_PartialFailureIDs 验证部分失败时 success_ids/failed_ids 正确。
 func TestAdminService_BulkUpdateAccounts_PartialFailureIDs(t *testing.T) {
 	repo := &accountRepoStubForBulkUpdate{
-		bindGroupErrByID: map[int64]error{
-			2: errors.New("bind failed"),
-		},
+		bindGroupsErr: errors.New("bind failed"),
 	}
 	svc := &adminServiceImpl{
 		accountRepo: repo,
@@ -149,11 +156,15 @@ func TestAdminService_BulkUpdateAccounts_PartialFailureIDs(t *testing.T) {
 
 	result, err := svc.BulkUpdateAccounts(context.Background(), input)
 	require.NoError(t, err)
-	require.Equal(t, 2, result.Success)
-	require.Equal(t, 1, result.Failed)
-	require.ElementsMatch(t, []int64{1, 3}, result.SuccessIDs)
-	require.ElementsMatch(t, []int64{2}, result.FailedIDs)
+	require.Equal(t, 0, result.Success)
+	require.Equal(t, 3, result.Failed)
+	require.Empty(t, result.SuccessIDs)
+	require.ElementsMatch(t, []int64{1, 2, 3}, result.FailedIDs)
 	require.Len(t, result.Results, 3)
+	require.True(t, repo.bindGroupsBatch.called)
+	require.Equal(t, []int64{1, 2, 3}, repo.bindGroupsBatch.accountIDs)
+	require.Equal(t, []int64{10}, repo.bindGroupsBatch.groupIDs)
+	require.Empty(t, repo.bindGroupsCalls)
 }
 
 func TestAdminService_BulkUpdateAccounts_NilGroupRepoReturnsError(t *testing.T) {
@@ -202,6 +213,31 @@ func TestAdminService_BulkUpdateAccounts_MixedChannelPreCheckBlocksOnExistingCon
 	require.Contains(t, err.Error(), "mixed channel")
 	// No BindGroups should have been called since the check runs before any write.
 	require.Empty(t, repo.bindGroupsCalls)
+	require.False(t, repo.bindGroupsBatch.called)
+}
+
+func TestAdminService_BulkUpdateAccounts_UsesBulkGroupBinding(t *testing.T) {
+	repo := &accountRepoStubForBulkUpdate{}
+	svc := &adminServiceImpl{
+		accountRepo: repo,
+		groupRepo:   &groupRepoStubForAdmin{getByID: &Group{ID: 10, Name: "g10"}},
+	}
+
+	groupIDs := []int64{10}
+	input := &BulkUpdateAccountsInput{
+		AccountIDs:            []int64{1, 2, 3},
+		GroupIDs:              &groupIDs,
+		SkipMixedChannelCheck: true,
+	}
+
+	result, err := svc.BulkUpdateAccounts(context.Background(), input)
+	require.NoError(t, err)
+	require.Equal(t, 3, result.Success)
+	require.Equal(t, 0, result.Failed)
+	require.True(t, repo.bindGroupsBatch.called)
+	require.Equal(t, []int64{1, 2, 3}, repo.bindGroupsBatch.accountIDs)
+	require.Equal(t, []int64{10}, repo.bindGroupsBatch.groupIDs)
+	require.Empty(t, repo.bindGroupsCalls, "bulk group update should not bind accounts one by one")
 }
 
 func TestAdminServiceBulkUpdateAccounts_ResolvesIDsFromFilters(t *testing.T) {

@@ -680,6 +680,7 @@ func TestAPIContracts(t *testing.T) {
 					"promo_code_enabled": true,
 					"password_reset_enabled": false,
 						"frontend_url": "",
+						"gateway_max_account_switches": 10,
 						"totp_enabled": false,
 						"totp_encryption_key_configured": false,
 						"login_agreement_enabled": false,
@@ -952,6 +953,7 @@ func TestAPIContracts(t *testing.T) {
 					"promo_code_enabled": true,
 					"password_reset_enabled": false,
 					"frontend_url": "",
+						"gateway_max_account_switches": 10,
 						"invitation_code_enabled": false,
 						"totp_enabled": false,
 						"totp_encryption_key_configured": false,
@@ -1704,6 +1706,10 @@ func (s *stubAccountRepo) AutoPauseExpiredAccounts(ctx context.Context, now time
 }
 
 func (s *stubAccountRepo) BindGroups(ctx context.Context, accountID int64, groupIDs []int64) error {
+	return errors.New("not implemented")
+}
+
+func (s *stubAccountRepo) BindGroupsForAccounts(ctx context.Context, accountIDs []int64, groupIDs []int64) error {
 	return errors.New("not implemented")
 }
 

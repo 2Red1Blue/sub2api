@@ -44,6 +44,9 @@ import (
 type accountRepository struct {
 	client *dbent.Client // Ent ORM 客户端
 	sql    sqlExecutor   // 原生 SQL 执行接口
+	txDB   interface {
+		BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+	}
 	// schedulerCache 用于在账号状态变更时主动同步快照到缓存，
 	// 确保粘性会话能及时感知账号不可用状态。
 	// Used to proactively sync account snapshot to cache when status changes,
@@ -73,7 +76,13 @@ func NewAccountRepository(client *dbent.Client, sqlDB *sql.DB, schedulerCache se
 // newAccountRepositoryWithSQL 是内部构造函数，支持依赖注入 SQL 执行器。
 // 这种设计便于单元测试时注入 mock 对象。
 func newAccountRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor, schedulerCache service.SchedulerCache) *accountRepository {
-	return &accountRepository{client: client, sql: sqlq, schedulerCache: schedulerCache}
+	repo := &accountRepository{client: client, sql: sqlq, schedulerCache: schedulerCache}
+	if txDB, ok := sqlq.(interface {
+		BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+	}); ok {
+		repo.txDB = txDB
+	}
+	return repo
 }
 
 func (r *accountRepository) Create(ctx context.Context, account *service.Account) error {
@@ -923,6 +932,76 @@ func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, gro
 	return nil
 }
 
+func (r *accountRepository) BindGroupsForAccounts(ctx context.Context, accountIDs []int64, groupIDs []int64) error {
+	accountIDs = uniquePositiveInt64s(accountIDs)
+	groupIDs = uniquePositiveInt64s(groupIDs)
+	if len(accountIDs) == 0 {
+		return nil
+	}
+	if r.txDB == nil {
+		return errors.New("transactional SQL executor not configured")
+	}
+
+	tx, err := r.txDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx,
+		`DELETE FROM account_groups
+		 WHERE account_id = ANY($1)
+		 RETURNING group_id`,
+		pq.Array(accountIDs),
+	)
+	if err != nil {
+		return err
+	}
+
+	affectedGroupIDs := append([]int64(nil), groupIDs...)
+	for rows.Next() {
+		var groupID int64
+		if err := rows.Scan(&groupID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		affectedGroupIDs = append(affectedGroupIDs, groupID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if len(groupIDs) > 0 {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO account_groups (account_id, group_id, priority, created_at)
+			 SELECT target_accounts.account_id, target_groups.group_id, target_groups.ordinality::int, NOW()
+			 FROM unnest($1::bigint[]) AS target_accounts(account_id)
+			 CROSS JOIN unnest($2::bigint[]) WITH ORDINALITY AS target_groups(group_id, ordinality)
+			 ON CONFLICT (account_id, group_id) DO UPDATE SET priority = EXCLUDED.priority`,
+			pq.Array(accountIDs),
+			pq.Array(groupIDs),
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	payload := map[string]any{
+		"account_ids": accountIDs,
+	}
+	if mergedGroupIDs := uniquePositiveInt64s(affectedGroupIDs); len(mergedGroupIDs) > 0 {
+		payload["group_ids"] = mergedGroupIDs
+	}
+	if err := enqueueSchedulerOutbox(ctx, tx, service.SchedulerOutboxEventAccountBulkChanged, nil, nil, payload); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue bulk bind groups failed: err=%v", err)
+	}
+
+	return tx.Commit()
+}
+
 func (r *accountRepository) ListSchedulable(ctx context.Context) ([]service.Account, error) {
 	now := time.Now()
 	accounts, err := r.client.Account.Query().
@@ -1743,6 +1822,22 @@ func mergeGroupIDs(a []int64, b []int64) []int64 {
 		out = append(out, id)
 	}
 	for _, id := range b {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func uniquePositiveInt64s(ids []int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
 		if id <= 0 {
 			continue
 		}

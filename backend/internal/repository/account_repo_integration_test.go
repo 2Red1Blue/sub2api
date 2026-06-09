@@ -4,6 +4,8 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
@@ -11,6 +13,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/accountgroup"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -558,6 +562,71 @@ func (s *AccountRepoSuite) TestBindGroups_EmptyList() {
 	s.Require().Empty(groups, "expected 0 groups after binding empty list")
 }
 
+func TestAccountRepository_BindGroupsForAccounts_ReplacesBindingsInBulk(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := newAccountRepositoryWithSQL(client, integrationDB, nil)
+	prefix := uniqueTestValue(t, "bulk-bind")
+
+	oldGroup := mustCreateGroup(t, client, &service.Group{Name: prefix + "-old"})
+	newGroup1 := mustCreateGroup(t, client, &service.Group{Name: prefix + "-new-1"})
+	newGroup2 := mustCreateGroup(t, client, &service.Group{Name: prefix + "-new-2"})
+	account1 := mustCreateAccount(t, client, &service.Account{Name: prefix + "-1"})
+	account2 := mustCreateAccount(t, client, &service.Account{Name: prefix + "-2"})
+	untouched := mustCreateAccount(t, client, &service.Account{Name: prefix + "-untouched"})
+	t.Cleanup(func() {
+		_, _ = integrationDB.ExecContext(
+			context.Background(),
+			`DELETE FROM scheduler_outbox
+			 WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(payload->'account_ids') AS account_id WHERE account_id = $1)
+			   AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(payload->'account_ids') AS account_id WHERE account_id = $2)`,
+			strconv.FormatInt(account1.ID, 10),
+			strconv.FormatInt(account2.ID, 10),
+		)
+		_, _ = integrationDB.ExecContext(context.Background(), "DELETE FROM accounts WHERE id = ANY($1)", pq.Array([]int64{account1.ID, account2.ID, untouched.ID}))
+		_, _ = integrationDB.ExecContext(context.Background(), "DELETE FROM groups WHERE id = ANY($1)", pq.Array([]int64{oldGroup.ID, newGroup1.ID, newGroup2.ID}))
+	})
+	mustBindAccountToGroup(t, client, account1.ID, oldGroup.ID, 1)
+	mustBindAccountToGroup(t, client, account2.ID, oldGroup.ID, 1)
+	mustBindAccountToGroup(t, client, untouched.ID, oldGroup.ID, 1)
+
+	err := repo.BindGroupsForAccounts(ctx, []int64{account1.ID, account2.ID}, []int64{newGroup1.ID, newGroup2.ID})
+	require.NoError(t, err)
+
+	groups1, err := repo.GetGroups(ctx, account1.ID)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{newGroup1.ID, newGroup2.ID}, idsOfGroups(groups1))
+
+	groups2, err := repo.GetGroups(ctx, account2.ID)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{newGroup1.ID, newGroup2.ID}, idsOfGroups(groups2))
+
+	untouchedGroups, err := repo.GetGroups(ctx, untouched.ID)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{oldGroup.ID}, idsOfGroups(untouchedGroups))
+
+	var eventType string
+	var payloadBytes []byte
+	err = integrationDB.QueryRowContext(
+		ctx,
+		`SELECT event_type, payload
+		   FROM scheduler_outbox
+		  WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(payload->'account_ids') AS account_id WHERE account_id = $1)
+		    AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(payload->'account_ids') AS account_id WHERE account_id = $2)
+		  ORDER BY id DESC
+		  LIMIT 1`,
+		strconv.FormatInt(account1.ID, 10),
+		strconv.FormatInt(account2.ID, 10),
+	).Scan(&eventType, &payloadBytes)
+	require.NoError(t, err)
+	require.Equal(t, service.SchedulerOutboxEventAccountBulkChanged, eventType)
+
+	var payload map[string][]int64
+	require.NoError(t, json.Unmarshal(payloadBytes, &payload))
+	require.ElementsMatch(t, []int64{account1.ID, account2.ID}, payload["account_ids"])
+	require.ElementsMatch(t, []int64{oldGroup.ID, newGroup1.ID, newGroup2.ID}, payload["group_ids"])
+}
+
 // --- Schedulable ---
 
 func (s *AccountRepoSuite) TestListSchedulable() {
@@ -1069,6 +1138,14 @@ func idsOfAccounts(accounts []service.Account) []int64 {
 	out := make([]int64, 0, len(accounts))
 	for i := range accounts {
 		out = append(out, accounts[i].ID)
+	}
+	return out
+}
+
+func idsOfGroups(groups []service.Group) []int64 {
+	out := make([]int64, 0, len(groups))
+	for i := range groups {
+		out = append(out, groups[i].ID)
 	}
 	return out
 }
