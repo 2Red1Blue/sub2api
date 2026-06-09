@@ -850,6 +850,28 @@ func TestContentModerationUpdateConfig_SavesCustomThresholds(t *testing.T) {
 	require.NotContains(t, saved.Thresholds, "unknown")
 }
 
+func TestContentModerationUpdateConfig_SavesGatewayDebugLogging(t *testing.T) {
+	repo := &contentModerationTestSettingRepo{values: map[string]string{}}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+
+	view, err := svc.GetConfig(context.Background())
+	require.NoError(t, err)
+	require.False(t, view.GatewayDebugLogging)
+	require.False(t, svc.GatewayDebugLoggingEnabled(context.Background()))
+
+	enabled := true
+	view, err = svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{
+		GatewayDebugLogging: &enabled,
+	})
+	require.NoError(t, err)
+	require.True(t, view.GatewayDebugLogging)
+	require.True(t, svc.GatewayDebugLoggingEnabled(context.Background()))
+
+	var saved ContentModerationConfig
+	require.NoError(t, json.Unmarshal([]byte(repo.values[SettingKeyContentModerationConfig]), &saved))
+	require.True(t, saved.GatewayDebugLogging)
+}
+
 func TestExtractContentModerationInput_AnthropicImageSourceOnlyParticipatesInMemory(t *testing.T) {
 	body := []byte(`{
 		"messages": [

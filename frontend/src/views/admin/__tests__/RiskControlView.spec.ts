@@ -95,6 +95,7 @@ const baseConfig = (): ContentModerationConfig => ({
   hit_retention_days: 180,
   non_hit_retention_days: 3,
   pre_hash_check_enabled: false,
+  gateway_debug_logging: false,
   blocked_keywords: [],
   keyword_blocking_mode: 'keyword_and_api',
   thresholds: {
@@ -274,6 +275,37 @@ describe('admin RiskControlView', () => {
       }),
     }))
     expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('saves the gateway debug logging switch', async () => {
+    getConfig.mockResolvedValue({
+      ...baseConfig(),
+      gateway_debug_logging: true,
+    })
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.runtime').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      gateway_debug_logging: true,
+    }))
   })
 
   it('describes worker runtime as async audit and pre-block record processing', async () => {

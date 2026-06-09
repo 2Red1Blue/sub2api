@@ -157,6 +157,7 @@ type ContentModerationConfig struct {
 	HitRetentionDays     int                          `json:"hit_retention_days"`
 	NonHitRetentionDays  int                          `json:"non_hit_retention_days"`
 	PreHashCheckEnabled  bool                         `json:"pre_hash_check_enabled"`
+	GatewayDebugLogging  bool                         `json:"gateway_debug_logging"`
 	BlockedKeywords      []string                     `json:"blocked_keywords"`
 	KeywordBlockingMode  string                       `json:"keyword_blocking_mode"`
 	ModelFilter          ContentModerationModelFilter `json:"model_filter"`
@@ -190,6 +191,7 @@ type ContentModerationConfigView struct {
 	HitRetentionDays     int                             `json:"hit_retention_days"`
 	NonHitRetentionDays  int                             `json:"non_hit_retention_days"`
 	PreHashCheckEnabled  bool                            `json:"pre_hash_check_enabled"`
+	GatewayDebugLogging  bool                            `json:"gateway_debug_logging"`
 	BlockedKeywords      []string                        `json:"blocked_keywords"`
 	KeywordBlockingMode  string                          `json:"keyword_blocking_mode"`
 	ModelFilter          ContentModerationModelFilter    `json:"model_filter"`
@@ -277,6 +279,7 @@ type UpdateContentModerationConfigInput struct {
 	HitRetentionDays     *int                          `json:"hit_retention_days"`
 	NonHitRetentionDays  *int                          `json:"non_hit_retention_days"`
 	PreHashCheckEnabled  *bool                         `json:"pre_hash_check_enabled"`
+	GatewayDebugLogging  *bool                         `json:"gateway_debug_logging"`
 	BlockedKeywords      *[]string                     `json:"blocked_keywords"`
 	KeywordBlockingMode  *string                       `json:"keyword_blocking_mode"`
 	ModelFilter          *ContentModerationModelFilter `json:"model_filter"`
@@ -629,6 +632,9 @@ func (s *ContentModerationService) UpdateConfig(ctx context.Context, input Updat
 	}
 	if input.PreHashCheckEnabled != nil {
 		cfg.PreHashCheckEnabled = *input.PreHashCheckEnabled
+	}
+	if input.GatewayDebugLogging != nil {
+		cfg.GatewayDebugLogging = *input.GatewayDebugLogging
 	}
 	if input.BlockedKeywords != nil {
 		cfg.BlockedKeywords = normalizeBlockedKeywords(*input.BlockedKeywords)
@@ -1304,6 +1310,17 @@ func (s *ContentModerationService) ClearFlaggedInputHashes(ctx context.Context) 
 	return &ContentModerationClearHashesResult{Deleted: deleted}, nil
 }
 
+func (s *ContentModerationService) GatewayDebugLoggingEnabled(ctx context.Context) bool {
+	if s == nil || s.settingRepo == nil {
+		return false
+	}
+	cfg, err := s.loadConfig(ctx)
+	if err != nil || cfg == nil {
+		return false
+	}
+	return cfg.GatewayDebugLogging
+}
+
 func (s *ContentModerationService) GetStatus(ctx context.Context) (*ContentModerationRuntimeStatus, error) {
 	if s == nil {
 		return &ContentModerationRuntimeStatus{}, nil
@@ -1829,6 +1846,7 @@ func defaultContentModerationConfig() *ContentModerationConfig {
 		HitRetentionDays:     defaultContentModerationHitRetentionDays,
 		NonHitRetentionDays:  defaultContentModerationNonHitRetentionDays,
 		PreHashCheckEnabled:  false,
+		GatewayDebugLogging:  false,
 		BlockedKeywords:      []string{},
 		KeywordBlockingMode:  ContentModerationKeywordModeKeywordAndAPI,
 		ModelFilter: ContentModerationModelFilter{
@@ -2158,6 +2176,7 @@ func (s *ContentModerationService) configView(cfg *ContentModerationConfig) *Con
 		HitRetentionDays:     cfg.HitRetentionDays,
 		NonHitRetentionDays:  cfg.NonHitRetentionDays,
 		PreHashCheckEnabled:  cfg.PreHashCheckEnabled,
+		GatewayDebugLogging:  cfg.GatewayDebugLogging,
 		BlockedKeywords:      append([]string(nil), cfg.BlockedKeywords...),
 		KeywordBlockingMode:  cfg.KeywordBlockingMode,
 		ModelFilter:          cloneContentModerationModelFilter(cfg.ModelFilter),

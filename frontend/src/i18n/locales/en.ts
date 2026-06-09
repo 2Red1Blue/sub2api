@@ -2568,6 +2568,8 @@ export default {
       sampleRate: 'Sample Rate',
       recordNonHits: 'Record Non-Hits',
       recordNonHitsHint: 'When enabled, sampled non-hit request summaries are redacted before storage.',
+      gatewayDebugLogging: 'Gateway Debug Logs',
+      gatewayDebugLoggingHint: 'Print start/done structured logs for each gateway moderation check. Enable only while troubleshooting.',
       preHashCheck: 'Enable Pre-Hash Check',
       preHashCheckHint: 'Hashes from async hits are blocked before moderation; this does not send email or increment ban counters.',
       flaggedHashCount: 'Current hash collection size: {count}',

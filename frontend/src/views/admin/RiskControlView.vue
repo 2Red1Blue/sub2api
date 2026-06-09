@@ -810,6 +810,13 @@
               </div>
               <Toggle v-model="configForm.record_non_hits" />
             </div>
+            <div class="flex items-center justify-between rounded-lg border border-gray-100 p-4 dark:border-dark-700 lg:col-span-2">
+              <div>
+                <p class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.riskControl.gatewayDebugLogging') }}</p>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.gatewayDebugLoggingHint') }}</p>
+              </div>
+              <Toggle v-model="configForm.gateway_debug_logging" />
+            </div>
             <div class="space-y-4 rounded-lg border border-gray-100 p-4 dark:border-dark-700 lg:col-span-2">
               <div class="flex items-center justify-between gap-4">
                 <div>
@@ -1220,6 +1227,7 @@ const configForm = reactive({
   all_groups: true,
   group_ids: [] as number[],
   record_non_hits: false,
+  gateway_debug_logging: false,
   worker_count: 4,
   queue_size: 32768,
   block_status: 403,
@@ -1696,6 +1704,7 @@ function applyConfig(config: ContentModerationConfig) {
   configForm.all_groups = config.all_groups
   configForm.group_ids = Array.isArray(config.group_ids) ? [...config.group_ids] : []
   configForm.record_non_hits = config.record_non_hits
+  configForm.gateway_debug_logging = config.gateway_debug_logging ?? false
   configForm.worker_count = config.worker_count || 4
   configForm.queue_size = config.queue_size || 32768
   configForm.block_status = config.block_status || 403
@@ -1775,6 +1784,7 @@ async function saveConfig() {
       all_groups: configForm.all_groups,
       group_ids: configForm.all_groups ? [] : [...configForm.group_ids],
       record_non_hits: configForm.record_non_hits,
+      gateway_debug_logging: configForm.gateway_debug_logging,
       clear_api_key: configForm.clear_api_key,
       worker_count: Number(configForm.worker_count) || 4,
       queue_size: Number(configForm.queue_size) || 32768,

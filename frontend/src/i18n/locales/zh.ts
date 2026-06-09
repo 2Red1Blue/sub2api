@@ -2645,6 +2645,8 @@ export default {
       sampleRate: '采样率',
       recordNonHits: '记录未命中输入',
       recordNonHitsHint: '开启后会记录抽样但未命中的请求摘要，摘要会先脱敏再入库。',
+      gatewayDebugLogging: '网关排查日志',
+      gatewayDebugLoggingHint: '开启后打印每次网关内容审计的 start/done 结构化日志；仅排查时建议打开。',
       preHashCheck: '启用前置哈希比对',
       preHashCheckHint: '异步审核命中过的输入哈希会被前置拦截；该拦截不发送邮件，也不累计封禁次数。',
       flaggedHashCount: '当前哈希集合数量：{count} 个',
