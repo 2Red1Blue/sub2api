@@ -255,6 +255,38 @@ func TestGetRuntimeLogConfig_InvalidJSONFallback(t *testing.T) {
 	if got.Level != "warn" {
 		t.Fatalf("level = %q, want warn", got.Level)
 	}
+	if !got.AccessLogEnabled {
+		t.Fatalf("access log should default to enabled")
+	}
+}
+
+func TestGetRuntimeLogConfig_LegacyConfigDefaultsAccessLogEnabled(t *testing.T) {
+	repo := newRuntimeSettingRepoStub()
+	repo.values[SettingKeyOpsRuntimeLogConfig] = `{"level":"info","enable_sampling":false,"sampling_initial":100,"sampling_thereafter":100,"caller":true,"stacktrace_level":"error","retention_days":30}`
+
+	svc := &OpsService{
+		settingRepo: repo,
+		cfg: &config.Config{
+			Log: config.LogConfig{
+				Level:           "info",
+				Caller:          true,
+				StacktraceLevel: "error",
+				Sampling: config.LogSamplingConfig{
+					Enabled:    false,
+					Initial:    100,
+					Thereafter: 100,
+				},
+			},
+		},
+	}
+
+	got, err := svc.GetRuntimeLogConfig(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeLogConfig() error: %v", err)
+	}
+	if !got.AccessLogEnabled {
+		t.Fatalf("legacy runtime log config should keep access log enabled")
+	}
 }
 
 func TestUpdateRuntimeLogConfig_PersistFailureRollback(t *testing.T) {
@@ -515,13 +547,14 @@ func TestUpdateRuntimeLogConfig_Success(t *testing.T) {
 	}
 
 	next, err := svc.UpdateRuntimeLogConfig(context.Background(), &OpsRuntimeLogConfig{
-		Level:           "debug",
-		EnableSampling:  false,
-		SamplingInitial: 100,
-		SamplingNext:    100,
-		Caller:          true,
-		StacktraceLevel: "error",
-		RetentionDays:   30,
+		Level:            "debug",
+		EnableSampling:   false,
+		SamplingInitial:  100,
+		SamplingNext:     100,
+		Caller:           true,
+		StacktraceLevel:  "error",
+		RetentionDays:    30,
+		AccessLogEnabled: false,
 	}, 2)
 	if err != nil {
 		t.Fatalf("UpdateRuntimeLogConfig() error: %v", err)
@@ -531,6 +564,9 @@ func TestUpdateRuntimeLogConfig_Success(t *testing.T) {
 	}
 	if logger.CurrentLevel() != "debug" {
 		t.Fatalf("expected applied level debug, got %s", logger.CurrentLevel())
+	}
+	if logger.AccessLogEnabled() {
+		t.Fatalf("expected access log disabled")
 	}
 }
 

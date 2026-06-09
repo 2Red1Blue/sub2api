@@ -27,6 +27,11 @@ func Logger() gin.HandlerFunc {
 			return
 		}
 
+		accessLogEnabled := logger.AccessLogEnabled()
+		if !accessLogEnabled && len(c.Errors) == 0 {
+			return
+		}
+
 		endTime := time.Now()
 		latency := endTime.Sub(startTime)
 
@@ -58,7 +63,9 @@ func Logger() gin.HandlerFunc {
 		}
 
 		l := logger.FromContext(c.Request.Context()).With(fields...)
-		l.Info("http request completed", zap.Time("completed_at", endTime))
+		if accessLogEnabled {
+			l.Info("http request completed", zap.Time("completed_at", endTime))
+		}
 
 		if len(c.Errors) > 0 {
 			l.Warn("http request contains gin errors", zap.String("errors", c.Errors.String()))

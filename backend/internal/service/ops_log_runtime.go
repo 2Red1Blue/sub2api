@@ -15,13 +15,14 @@ import (
 
 func defaultOpsRuntimeLogConfig(cfg *config.Config) *OpsRuntimeLogConfig {
 	out := &OpsRuntimeLogConfig{
-		Level:           "info",
-		EnableSampling:  false,
-		SamplingInitial: 100,
-		SamplingNext:    100,
-		Caller:          true,
-		StacktraceLevel: "error",
-		RetentionDays:   30,
+		Level:            "info",
+		EnableSampling:   false,
+		SamplingInitial:  100,
+		SamplingNext:     100,
+		Caller:           true,
+		StacktraceLevel:  "error",
+		RetentionDays:    30,
+		AccessLogEnabled: true,
 	}
 	if cfg == nil {
 		return out
@@ -115,8 +116,16 @@ func (s *OpsService) GetRuntimeLogConfig(ctx context.Context) (*OpsRuntimeLogCon
 	if err := json.Unmarshal([]byte(raw), cfg); err != nil {
 		return defaultCfg, nil
 	}
+	cfg.AccessLogEnabled = defaultRuntimeAccessLogEnabled(raw, cfg.AccessLogEnabled, defaultCfg.AccessLogEnabled)
 	normalizeOpsRuntimeLogConfig(cfg, defaultCfg)
 	return cfg, nil
+}
+
+func defaultRuntimeAccessLogEnabled(raw string, value bool, fallback bool) bool {
+	if strings.Contains(raw, `"access_log_enabled"`) {
+		return value
+	}
+	return fallback
 }
 
 func (s *OpsService) UpdateRuntimeLogConfig(ctx context.Context, req *OpsRuntimeLogConfig, operatorID int64) (*OpsRuntimeLogConfig, error) {
@@ -227,6 +236,7 @@ func applyOpsRuntimeLogConfig(cfg *OpsRuntimeLogConfig) error {
 	}); err != nil {
 		return err
 	}
+	logger.SetAccessLogEnabled(cfg.AccessLogEnabled)
 	return nil
 }
 

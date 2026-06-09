@@ -48,9 +48,14 @@ var (
 	atomicLevel   zap.AtomicLevel
 	initOptions   InitOptions
 	currentSink   atomic.Value // sinkState
+	accessLogOn   atomic.Bool
 	stdLogUndo    func()
 	bootstrapOnce sync.Once
 )
+
+func init() {
+	accessLogOn.Store(true)
+}
 
 type sinkState struct {
 	sink Sink
@@ -124,6 +129,14 @@ func CurrentLevel() string {
 		return "info"
 	}
 	return atomicLevel.Level().String()
+}
+
+func SetAccessLogEnabled(enabled bool) {
+	accessLogOn.Store(enabled)
+}
+
+func AccessLogEnabled() bool {
+	return accessLogOn.Load()
 }
 
 func SetSink(sink Sink) {

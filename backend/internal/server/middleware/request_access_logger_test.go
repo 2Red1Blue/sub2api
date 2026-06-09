@@ -56,8 +56,10 @@ func initMiddlewareTestLoggerWithLevel(t *testing.T, level string) *testLogSink 
 	}
 	sink := &testLogSink{}
 	logger.SetSink(sink)
+	logger.SetAccessLogEnabled(true)
 	t.Cleanup(func() {
 		logger.SetSink(nil)
+		logger.SetAccessLogEnabled(true)
 	})
 	return sink
 }
@@ -255,5 +257,68 @@ func TestLogger_AccessLogDroppedWhenLevelWarn(t *testing.T) {
 		if event != nil && event.Message == "http request completed" {
 			t.Fatalf("access log should not be indexed when level=warn: %+v", event)
 		}
+	}
+}
+
+func TestLogger_AccessLogDisabledSkipsCompletedLog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := initMiddlewareTestLogger(t)
+	logger.SetAccessLogEnabled(false)
+
+	r := gin.New()
+	r.Use(RequestLogger())
+	r.Use(Logger())
+	r.GET("/api/test", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
+	}
+
+	for _, event := range sink.list() {
+		if event != nil && event.Message == "http request completed" {
+			t.Fatalf("access log should be skipped when disabled: %+v", event)
+		}
+	}
+}
+
+func TestLogger_AccessLogDisabledKeepsGinErrorWarn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := initMiddlewareTestLogger(t)
+	logger.SetAccessLogEnabled(false)
+
+	r := gin.New()
+	r.Use(RequestLogger())
+	r.Use(Logger())
+	r.GET("/api/test", func(c *gin.Context) {
+		_ = c.Error(context.Canceled)
+		c.Status(http.StatusInternalServerError)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d", w.Code)
+	}
+
+	foundWarn := false
+	for _, event := range sink.list() {
+		if event == nil {
+			continue
+		}
+		if event.Message == "http request completed" {
+			t.Fatalf("completed access log should be skipped when disabled: %+v", event)
+		}
+		if event.Message == "http request contains gin errors" {
+			foundWarn = true
+		}
+	}
+	if !foundWarn {
+		t.Fatalf("gin error warning should still be logged")
 	}
 }

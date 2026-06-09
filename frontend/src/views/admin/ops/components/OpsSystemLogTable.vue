@@ -39,7 +39,8 @@ const runtimeConfig = reactive<OpsRuntimeLogConfig>({
   sampling_thereafter: 100,
   caller: true,
   stacktrace_level: 'error',
-  retention_days: 30
+  retention_days: 30,
+  access_log_enabled: true
 })
 
 const filters = reactive({
@@ -222,6 +223,7 @@ const loadRuntimeConfig = async () => {
     runtimeConfig.caller = cfg.caller
     runtimeConfig.stacktrace_level = cfg.stacktrace_level
     runtimeConfig.retention_days = cfg.retention_days
+    runtimeConfig.access_log_enabled = cfg.access_log_enabled ?? true
   } catch (err: any) {
     console.error('[OpsSystemLogTable] Failed to load runtime log config', err)
   } finally {
@@ -240,6 +242,7 @@ const saveRuntimeConfig = async () => {
     runtimeConfig.caller = saved.caller
     runtimeConfig.stacktrace_level = saved.stacktrace_level
     runtimeConfig.retention_days = saved.retention_days
+    runtimeConfig.access_log_enabled = saved.access_log_enabled ?? true
     appStore.showSuccess('日志运行时配置已生效')
   } catch (err: any) {
     console.error('[OpsSystemLogTable] Failed to save runtime log config', err)
@@ -263,6 +266,7 @@ const resetRuntimeConfig = async () => {
     runtimeConfig.caller = saved.caller
     runtimeConfig.stacktrace_level = saved.stacktrace_level
     runtimeConfig.retention_days = saved.retention_days
+    runtimeConfig.access_log_enabled = saved.access_log_enabled ?? true
     appStore.showSuccess('已回滚到启动日志配置')
     await fetchHealth()
   } catch (err: any) {
@@ -407,6 +411,10 @@ onMounted(async () => {
               <label class="inline-flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
                 <input v-model="runtimeConfig.enable_sampling" type="checkbox" />
                 sampling
+              </label>
+              <label class="inline-flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                <input v-model="runtimeConfig.access_log_enabled" type="checkbox" />
+                access log
               </label>
             </div>
             <div class="flex flex-wrap items-center gap-2 lg:justify-end">
