@@ -1158,6 +1158,7 @@ export interface AdminDataImportResult {
 export interface CodexSessionImportRequest {
   content?: string
   contents?: string[]
+  items?: CodexSessionImportSource[]
   name?: string
   notes?: string | null
   group_ids?: number[]
@@ -1173,6 +1174,11 @@ export interface CodexSessionImportRequest {
   update_existing?: boolean
   skip_default_group_bind?: boolean
   confirm_mixed_channel_risk?: boolean
+}
+
+export interface CodexSessionImportSource {
+  name?: string
+  content: string
 }
 
 export interface CodexSessionImportMessage {

@@ -83,6 +83,180 @@ func TestParseCodexSessionImportEntriesFallsBackToLineModeForMixedJSONAndToken(t
 	}
 }
 
+func TestParseCodexSessionImportEntriesSupportsNamedItems(t *testing.T) {
+	req := CodexSessionImportRequest{
+		Items: []CodexSessionImportSource{
+			{Name: "alice", Content: `{"accessToken":"token-a"}`},
+			{Name: "bob", Content: `{"accessToken":"token-b"}`},
+		},
+	}
+
+	entries, err := parseCodexSessionImportEntries(req)
+	if err != nil {
+		t.Fatalf("parseCodexSessionImportEntries error = %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2", len(entries))
+	}
+	if entries[0].Name != "alice" || entries[1].Name != "bob" {
+		t.Fatalf("entry names = %q, %q; want alice, bob", entries[0].Name, entries[1].Name)
+	}
+}
+
+func TestParseCodexSessionImportEntriesExpandsAccountExportPackage(t *testing.T) {
+	token := buildCodexImportTestJWT(t, time.Now().Add(time.Hour), map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acct-from-claim",
+			"chatgpt_user_id":    "user-from-claim",
+			"chatgpt_plan_type":  "team",
+		},
+	})
+	req := CodexSessionImportRequest{
+		Content: `{
+			"exported_at": "2026-06-08T18:27:56Z",
+			"proxies": [],
+			"accounts": [
+				{
+					"name": "exported@example.com",
+					"platform": "openai",
+					"type": "oauth",
+					"credentials": {
+						"access_token": "` + token + `",
+						"refresh_token": "refresh-from-export",
+						"chatgpt_account_id": "acct-from-export",
+						"chatgpt_user_id": "user-from-export",
+						"expires_at": 1781782868
+					},
+					"extra": {
+						"email": "extra@example.com"
+					}
+				}
+			]
+		}`,
+	}
+
+	entries, err := parseCodexSessionImportEntries(req)
+	if err != nil {
+		t.Fatalf("parseCodexSessionImportEntries error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+
+	item, err := normalizeCodexImportEntry(entries[0])
+	if err != nil {
+		t.Fatalf("normalize export account error = %v", err)
+	}
+	if item.Credentials["access_token"] != token {
+		t.Fatalf("access_token not read from credentials")
+	}
+	if item.Credentials["refresh_token"] != "refresh-from-export" {
+		t.Fatalf("refresh_token = %v, want refresh-from-export", item.Credentials["refresh_token"])
+	}
+	if item.Credentials["chatgpt_account_id"] != "acct-from-export" {
+		t.Fatalf("chatgpt_account_id = %v, want acct-from-export", item.Credentials["chatgpt_account_id"])
+	}
+	if item.Credentials["chatgpt_user_id"] != "user-from-export" {
+		t.Fatalf("chatgpt_user_id = %v, want user-from-export", item.Credentials["chatgpt_user_id"])
+	}
+	if item.Credentials["email"] != "extra@example.com" {
+		t.Fatalf("email = %v, want extra@example.com", item.Credentials["email"])
+	}
+}
+
+func TestNormalizeCodexSimpleCredentialJSON(t *testing.T) {
+	token := buildCodexImportTestJWT(t, time.Now().Add(time.Hour), map[string]any{
+		"email": "simple@example.com",
+	})
+	raw := map[string]any{
+		"type":          "codex",
+		"email":         "simple@example.com",
+		"token_source":  "ChatGPT_team",
+		"access_token":  token,
+		"refresh_token": "refresh-from-simple",
+		"saved_at":      "2026-06-08T13:21:49Z",
+	}
+
+	item, err := normalizeCodexImportEntry(codexImportEntry{Index: 1, Value: raw})
+	if err != nil {
+		t.Fatalf("normalize simple account error = %v", err)
+	}
+	if item.Credentials["access_token"] != token {
+		t.Fatalf("access_token not read from top level")
+	}
+	if item.Credentials["refresh_token"] != "refresh-from-simple" {
+		t.Fatalf("refresh_token = %v, want refresh-from-simple", item.Credentials["refresh_token"])
+	}
+	if item.Credentials["email"] != "simple@example.com" {
+		t.Fatalf("email = %v, want simple@example.com", item.Credentials["email"])
+	}
+}
+
+func TestBuildCodexCreateAccountNameUsesFileNameWhenPrefixEmpty(t *testing.T) {
+	item := &codexImportAccount{Name: "json-name"}
+
+	got := buildCodexCreateAccountName("", "auth-file-name", item, 1, 2)
+	if got != "auth-file-name" {
+		t.Fatalf("name = %q, want auth-file-name", got)
+	}
+
+	got = buildCodexCreateAccountName("prefix", "auth-file-name", item, 2, 3)
+	if got != "prefix #2" {
+		t.Fatalf("name = %q, want prefix #2", got)
+	}
+}
+
+func TestCodexIdentityKeysDoNotDeduplicateSharedAccountIDWhenUserDiffers(t *testing.T) {
+	first := buildCodexIdentityKeys("shared-account", "user-a", "a@example.com", "access-a")
+	second := buildCodexIdentityKeys("shared-account", "user-b", "b@example.com", "access-b")
+
+	seen := map[string]int{}
+	markCodexIdentitySeen(seen, first, 1)
+	if duplicateIndex, ok := firstSeenCodexIdentity(seen, second); ok {
+		t.Fatalf("second identity matched duplicate index %d, want no duplicate", duplicateIndex)
+	}
+
+	accountOnly := buildCodexIdentityKeys("shared-account", "", "", "")
+	if len(accountOnly) != 1 || accountOnly[0] != "account:shared-account" {
+		t.Fatalf("account-only keys = %#v, want account fallback", accountOnly)
+	}
+}
+
+func TestNormalizeCodexNamedFileEntryUsesAccessTokenIdentityOnly(t *testing.T) {
+	first, err := normalizeCodexImportEntry(codexImportEntry{
+		Index: 1,
+		Name:  "file-a",
+		Value: map[string]any{
+			"accessToken": "access-a",
+			"account_id":  "shared-account",
+			"user_id":     "shared-user",
+			"email":       "same@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalize first entry error = %v", err)
+	}
+	second, err := normalizeCodexImportEntry(codexImportEntry{
+		Index: 2,
+		Name:  "file-b",
+		Value: map[string]any{
+			"accessToken": "access-b",
+			"account_id":  "shared-account",
+			"user_id":     "shared-user",
+			"email":       "same@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalize second entry error = %v", err)
+	}
+
+	seen := map[string]int{}
+	markCodexIdentitySeen(seen, first.IdentityKeys, 1)
+	if duplicateIndex, ok := firstSeenCodexIdentity(seen, second.IdentityKeys); ok {
+		t.Fatalf("second file identity matched duplicate index %d, want no duplicate", duplicateIndex)
+	}
+}
+
 func TestNormalizeCodexSessionJSONExtractsCredentialsAndIgnoresSessionToken(t *testing.T) {
 	accessToken := buildCodexImportTestJWT(t, time.Now().Add(time.Hour), map[string]any{
 		"email": "claim@example.com",

@@ -174,6 +174,9 @@ type SystemSettings struct {
 	// 分组隔离
 	AllowUngroupedKeyScheduling bool `json:"allow_ungrouped_key_scheduling"`
 
+	// Gateway account failover
+	GatewayMaxAccountSwitches int `json:"gateway_max_account_switches"`
+
 	// Backend Mode
 	BackendModeEnabled bool `json:"backend_mode_enabled"`
 

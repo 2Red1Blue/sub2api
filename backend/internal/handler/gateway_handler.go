@@ -112,6 +112,19 @@ func NewGatewayHandler(
 	}
 }
 
+func (h *GatewayHandler) effectiveMaxAccountSwitches(ctx context.Context) int {
+	if h == nil {
+		return service.GatewayMaxAccountSwitchesDefault
+	}
+	if h.settingService != nil {
+		return h.settingService.GetGatewayMaxAccountSwitches(ctx, h.maxAccountSwitches)
+	}
+	if h.maxAccountSwitches > 0 {
+		return h.maxAccountSwitches
+	}
+	return service.GatewayMaxAccountSwitchesDefault
+}
+
 // Messages handles Claude API compatible messages endpoint
 // POST /v1/messages
 func (h *GatewayHandler) Messages(c *gin.Context) {
@@ -570,7 +583,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	}
 
 	for {
-		fs := NewFailoverState(h.maxAccountSwitches, hasBoundSession)
+		fs := NewFailoverState(h.effectiveMaxAccountSwitches(c.Request.Context()), hasBoundSession)
 		retryWithFallback := false
 
 		for {

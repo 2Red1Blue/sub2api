@@ -22,23 +22,29 @@ import (
 const codexImportClockSkewSeconds int64 = 120
 
 type CodexSessionImportRequest struct {
-	Content                 string         `json:"content"`
-	Contents                []string       `json:"contents"`
-	Name                    string         `json:"name"`
-	Notes                   *string        `json:"notes"`
-	GroupIDs                []int64        `json:"group_ids"`
-	ProxyID                 *int64         `json:"proxy_id"`
-	Concurrency             *int           `json:"concurrency"`
-	Priority                *int           `json:"priority"`
-	RateMultiplier          *float64       `json:"rate_multiplier"`
-	LoadFactor              *int           `json:"load_factor"`
-	ExpiresAt               *int64         `json:"expires_at"`
-	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
-	CredentialExtras        map[string]any `json:"credential_extras"`
-	Extra                   map[string]any `json:"extra"`
-	UpdateExisting          *bool          `json:"update_existing"`
-	SkipDefaultGroupBind    *bool          `json:"skip_default_group_bind"`
-	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"`
+	Content                 string                     `json:"content"`
+	Contents                []string                   `json:"contents"`
+	Items                   []CodexSessionImportSource `json:"items"`
+	Name                    string                     `json:"name"`
+	Notes                   *string                    `json:"notes"`
+	GroupIDs                []int64                    `json:"group_ids"`
+	ProxyID                 *int64                     `json:"proxy_id"`
+	Concurrency             *int                       `json:"concurrency"`
+	Priority                *int                       `json:"priority"`
+	RateMultiplier          *float64                   `json:"rate_multiplier"`
+	LoadFactor              *int                       `json:"load_factor"`
+	ExpiresAt               *int64                     `json:"expires_at"`
+	AutoPauseOnExpired      *bool                      `json:"auto_pause_on_expired"`
+	CredentialExtras        map[string]any             `json:"credential_extras"`
+	Extra                   map[string]any             `json:"extra"`
+	UpdateExisting          *bool                      `json:"update_existing"`
+	SkipDefaultGroupBind    *bool                      `json:"skip_default_group_bind"`
+	ConfirmMixedChannelRisk *bool                      `json:"confirm_mixed_channel_risk"`
+}
+
+type CodexSessionImportSource struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
 }
 
 type CodexSessionImportResult struct {
@@ -68,6 +74,7 @@ type CodexSessionImportMessage struct {
 
 type codexImportEntry struct {
 	Index int
+	Name  string
 	Value any
 }
 
@@ -194,7 +201,7 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 			})
 			continue
 		}
-		accountName := buildCodexCreateAccountName(req.Name, item, entry.Index, len(entries))
+		accountName := buildCodexCreateAccountName(req.Name, entry.Name, item, entry.Index, len(entries))
 		effectiveExpiresAt, credentialExpiresAt, autoPauseOnExpired, expiryWarnings, expiryErr := resolveCodexImportExpiry(req, item)
 		if expiryErr != nil {
 			result.Failed++
@@ -351,25 +358,39 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 }
 
 func parseCodexSessionImportEntries(req CodexSessionImportRequest) ([]codexImportEntry, error) {
-	contents := make([]string, 0, 1+len(req.Contents))
+	type importSource struct {
+		Name    string
+		Content string
+	}
+
+	contents := make([]importSource, 0, 1+len(req.Contents)+len(req.Items))
 	if strings.TrimSpace(req.Content) != "" {
-		contents = append(contents, req.Content)
+		contents = append(contents, importSource{Content: req.Content})
 	}
 	for _, content := range req.Contents {
 		if strings.TrimSpace(content) != "" {
-			contents = append(contents, content)
+			contents = append(contents, importSource{Content: content})
+		}
+	}
+	for _, item := range req.Items {
+		if strings.TrimSpace(item.Content) != "" {
+			contents = append(contents, importSource{
+				Name:    strings.TrimSpace(item.Name),
+				Content: item.Content,
+			})
 		}
 	}
 
 	var entries []codexImportEntry
 	for _, content := range contents {
-		values, err := parseCodexSessionImportContent(content)
+		values, err := parseCodexSessionImportContent(content.Content)
 		if err != nil {
 			return nil, err
 		}
 		for _, value := range values {
 			entries = append(entries, codexImportEntry{
 				Index: len(entries) + 1,
+				Name:  content.Name,
 				Value: value,
 			})
 		}
@@ -450,6 +471,14 @@ func flattenCodexImportValues(values []any) []any {
 			}
 			return
 		}
+		if obj, ok := value.(map[string]any); ok {
+			if accounts, ok := obj["accounts"].([]any); ok {
+				for _, account := range accounts {
+					appendValue(account)
+				}
+				return
+			}
+		}
 		out = append(out, value)
 	}
 	for _, value := range values {
@@ -475,6 +504,8 @@ func normalizeCodexImportEntry(entry codexImportEntry) (*codexImportAccount, err
 		item.AccessToken = firstCodexString(raw,
 			[]string{"tokens", "access_token"},
 			[]string{"tokens", "accessToken"},
+			[]string{"credentials", "access_token"},
+			[]string{"credentials", "accessToken"},
 			[]string{"access_token"},
 			[]string{"accessToken"},
 			[]string{"token"},
@@ -482,17 +513,30 @@ func normalizeCodexImportEntry(entry codexImportEntry) (*codexImportAccount, err
 		item.RefreshToken = firstCodexString(raw,
 			[]string{"tokens", "refresh_token"},
 			[]string{"tokens", "refreshToken"},
+			[]string{"credentials", "refresh_token"},
+			[]string{"credentials", "refreshToken"},
 			[]string{"refresh_token"},
 			[]string{"refreshToken"},
 		)
 		item.IDToken = firstCodexString(raw,
 			[]string{"tokens", "id_token"},
 			[]string{"tokens", "idToken"},
+			[]string{"credentials", "id_token"},
+			[]string{"credentials", "idToken"},
 			[]string{"id_token"},
 			[]string{"idToken"},
 		)
-		item.Email = firstCodexString(raw, []string{"email"}, []string{"user", "email"})
+		item.Email = firstCodexString(raw,
+			[]string{"email"},
+			[]string{"user", "email"},
+			[]string{"extra", "email"},
+			[]string{"credentials", "email"},
+		)
 		item.AccountID = firstCodexString(raw,
+			[]string{"credentials", "chatgpt_account_id"},
+			[]string{"credentials", "chatgptAccountId"},
+			[]string{"credentials", "account_id"},
+			[]string{"credentials", "accountId"},
 			[]string{"chatgpt_account_id"},
 			[]string{"chatgptAccountId"},
 			[]string{"account_id"},
@@ -502,6 +546,10 @@ func normalizeCodexImportEntry(entry codexImportEntry) (*codexImportAccount, err
 			[]string{"account", "chatgpt_account_id"},
 		)
 		item.UserID = firstCodexString(raw,
+			[]string{"credentials", "chatgpt_user_id"},
+			[]string{"credentials", "chatgptUserId"},
+			[]string{"credentials", "user_id"},
+			[]string{"credentials", "userId"},
 			[]string{"chatgpt_user_id"},
 			[]string{"chatgptUserId"},
 			[]string{"user_id"},
@@ -509,12 +557,18 @@ func normalizeCodexImportEntry(entry codexImportEntry) (*codexImportAccount, err
 			[]string{"user", "id"},
 		)
 		item.PlanType = firstCodexString(raw,
+			[]string{"credentials", "plan_type"},
+			[]string{"credentials", "planType"},
 			[]string{"plan_type"},
 			[]string{"planType"},
 			[]string{"account", "plan_type"},
 			[]string{"account", "planType"},
 		)
 		item.Organization = firstCodexString(raw,
+			[]string{"credentials", "organization_id"},
+			[]string{"credentials", "organizationId"},
+			[]string{"credentials", "org_id"},
+			[]string{"credentials", "orgId"},
 			[]string{"organization_id"},
 			[]string{"organizationId"},
 			[]string{"org_id"},
@@ -535,6 +589,8 @@ func normalizeCodexImportEntry(entry codexImportEntry) (*codexImportAccount, err
 		if tokenExpiresAt, ok := firstCodexTime(raw,
 			[]string{"tokens", "expires_at"},
 			[]string{"tokens", "expiresAt"},
+			[]string{"credentials", "expires_at"},
+			[]string{"credentials", "expiresAt"},
 			[]string{"expires_at"},
 			[]string{"expiresAt"},
 		); ok {
@@ -583,7 +639,11 @@ func normalizeCodexImportEntry(entry codexImportEntry) (*codexImportAccount, err
 
 	fingerprint := codexTokenFingerprint(item.AccessToken)
 	item.Extra["access_token_sha256"] = fingerprint
-	item.IdentityKeys = buildCodexIdentityKeys(item.AccountID, item.UserID, item.Email, item.AccessToken)
+	if strings.TrimSpace(entry.Name) != "" {
+		item.IdentityKeys = buildCodexAccessIdentityKeys(item.AccessToken)
+	} else {
+		item.IdentityKeys = buildCodexIdentityKeys(item.AccountID, item.UserID, item.Email, item.AccessToken)
+	}
 	item.Name = buildCodexImportAccountName(item, entry.Index)
 
 	return item, nil
@@ -689,9 +749,13 @@ func buildCodexImportAccountName(item *codexImportAccount, index int) string {
 	return fmt.Sprintf("Codex 导入账号 %d", index)
 }
 
-func buildCodexCreateAccountName(base string, item *codexImportAccount, index, total int) string {
+func buildCodexCreateAccountName(base, sourceName string, item *codexImportAccount, index, total int) string {
 	base = strings.TrimSpace(base)
 	if base == "" {
+		sourceName = strings.TrimSpace(sourceName)
+		if sourceName != "" {
+			return sourceName
+		}
 		if item == nil {
 			return fmt.Sprintf("Codex 导入账号 %d", index)
 		}
@@ -806,21 +870,25 @@ func buildCodexIdentityKeys(accountID, userID, email, accessToken string) []stri
 	keys := make([]string, 0, 4)
 	accountID = strings.TrimSpace(accountID)
 	userID = strings.TrimSpace(userID)
-	if accountID != "" {
-		keys = append(keys, "account:"+accountID)
-	}
 	if userID != "" {
 		keys = append(keys, "user:"+userID)
-	}
-	if accountID == "" && userID == "" {
-		if email = strings.ToLower(strings.TrimSpace(email)); email != "" {
-			keys = append(keys, "email:"+email)
-		}
+	} else if email = strings.ToLower(strings.TrimSpace(email)); email != "" {
+		keys = append(keys, "email:"+email)
+	} else if accountID != "" {
+		keys = append(keys, "account:"+accountID)
 	}
 	if accessToken = strings.TrimSpace(accessToken); accessToken != "" {
 		keys = append(keys, "access:"+codexTokenFingerprint(accessToken))
 	}
 	return keys
+}
+
+func buildCodexAccessIdentityKeys(accessToken string) []string {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return nil
+	}
+	return []string{"access:" + codexTokenFingerprint(accessToken)}
 }
 
 func buildCodexAccountIndex(accounts []service.Account) *codexAccountIndex {

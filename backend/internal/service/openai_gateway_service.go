@@ -470,6 +470,16 @@ func (s *OpenAIGatewayService) ResolveChannelMappingAndRestrict(ctx context.Cont
 	return s.channelService.ResolveChannelMappingAndRestrict(ctx, groupID, model)
 }
 
+func (s *OpenAIGatewayService) EffectiveGatewayMaxAccountSwitches(ctx context.Context, fallback int) int {
+	if s == nil || s.settingService == nil {
+		if fallback <= 0 {
+			return GatewayMaxAccountSwitchesDefault
+		}
+		return fallback
+	}
+	return s.settingService.GetGatewayMaxAccountSwitches(ctx, fallback)
+}
+
 func (s *OpenAIGatewayService) isCodexImageGenerationBridgeEnabled(ctx context.Context, account *Account, apiKey *APIKey) bool {
 	if override := account.CodexImageGenerationBridgeOverride(); override != nil {
 		return *override

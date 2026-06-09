@@ -3766,6 +3766,29 @@
                 </div>
                 <Toggle v-model="form.openai_advanced_scheduler_enabled" />
               </div>
+
+              <div>
+                <label
+                  class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                >
+                  {{ t("admin.settings.scheduling.gatewayMaxAccountSwitches") }}
+                </label>
+                <input
+                  v-model.number="form.gateway_max_account_switches"
+                  type="number"
+                  min="1"
+                  max="1000"
+                  step="1"
+                  class="input w-32"
+                />
+                <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{
+                    t(
+                      "admin.settings.scheduling.gatewayMaxAccountSwitchesHint",
+                    )
+                  }}
+                </p>
+              </div>
             </div>
           </div>
 
@@ -7195,6 +7218,7 @@ const form = reactive<SettingsForm>({
   max_claude_code_version: "",
   // 分组隔离
   allow_ungrouped_key_scheduling: false,
+  gateway_max_account_switches: 10,
   openai_advanced_scheduler_enabled: false,
   // Gateway forwarding behavior
   enable_fingerprint_unification: true,
@@ -8302,6 +8326,10 @@ async function saveSettings() {
       min_claude_code_version: form.min_claude_code_version,
       max_claude_code_version: form.max_claude_code_version,
       allow_ungrouped_key_scheduling: form.allow_ungrouped_key_scheduling,
+      gateway_max_account_switches: Math.min(
+        1000,
+        Math.max(1, Math.floor(Number(form.gateway_max_account_switches) || 10)),
+      ),
       enable_fingerprint_unification: form.enable_fingerprint_unification,
       enable_metadata_passthrough: form.enable_metadata_passthrough,
       enable_cch_signing: form.enable_cch_signing,

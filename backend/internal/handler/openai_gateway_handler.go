@@ -105,6 +105,19 @@ func NewOpenAIGatewayHandler(
 	}
 }
 
+func (h *OpenAIGatewayHandler) effectiveMaxAccountSwitches(ctx context.Context) int {
+	if h == nil {
+		return service.GatewayMaxAccountSwitchesDefault
+	}
+	if h.gatewayService != nil {
+		return h.gatewayService.EffectiveGatewayMaxAccountSwitches(ctx, h.maxAccountSwitches)
+	}
+	if h.maxAccountSwitches > 0 {
+		return h.maxAccountSwitches
+	}
+	return service.GatewayMaxAccountSwitchesDefault
+}
+
 // Responses handles OpenAI Responses API endpoint
 // POST /openai/v1/responses
 func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
@@ -282,7 +295,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
 	requireCompact := isOpenAIRemoteCompactPath(c)
 
-	maxAccountSwitches := h.maxAccountSwitches
+	maxAccountSwitches := h.effectiveMaxAccountSwitches(c.Request.Context())
 	switchCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
@@ -693,7 +706,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	promptCacheKey := h.gatewayService.ExtractSessionID(c, body)
 	sessionHash, promptCacheKey = resolveOpenAIMessagesMetadataSession(sessionHash, promptCacheKey, reqModel, body)
 
-	maxAccountSwitches := h.maxAccountSwitches
+	maxAccountSwitches := h.effectiveMaxAccountSwitches(c.Request.Context())
 	switchCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
@@ -1303,7 +1316,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		firstMessage,
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
-	maxAccountSwitches := h.maxAccountSwitches
+	maxAccountSwitches := h.effectiveMaxAccountSwitches(ctx)
 	switchCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	var lastFailoverErr *service.UpstreamFailoverError

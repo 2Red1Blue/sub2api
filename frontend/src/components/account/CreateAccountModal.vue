@@ -46,13 +46,13 @@
       class="space-y-5"
     >
       <div>
-        <label class="input-label">{{ t('admin.accounts.accountName') }}</label>
+        <label class="input-label">{{ accountNameLabel }}</label>
         <input
           v-model="form.name"
           type="text"
-          required
+          :required="isAccountNameRequired"
           class="input"
-          :placeholder="t('admin.accounts.enterAccountName')"
+          :placeholder="accountNamePlaceholder"
           data-tour="account-form-name"
         />
       </div>
@@ -3224,6 +3224,7 @@ import type {
   AccountType,
   CheckMixedChannelResponse,
   CreateAccountRequest,
+  CodexSessionImportRequest,
   CodexSessionImportMessage,
   OpenAICompactMode,
   OpenAIResponsesMode,
@@ -3707,6 +3708,26 @@ const isOAuthFlow = computed(() => {
     return false
   }
   return accountCategory.value === 'oauth-based'
+})
+
+const isOpenAIOAuthFlow = computed(() => {
+  return form.platform === 'openai' && isOAuthFlow.value
+})
+
+const isAccountNameRequired = computed(() => {
+  return !isOpenAIOAuthFlow.value
+})
+
+const accountNameLabel = computed(() => {
+  return isOpenAIOAuthFlow.value
+    ? t('admin.accounts.accountNameOrImportPrefix')
+    : t('admin.accounts.accountName')
+})
+
+const accountNamePlaceholder = computed(() => {
+  return isOpenAIOAuthFlow.value
+    ? t('admin.accounts.enterAccountNameOrImportPrefix')
+    : t('admin.accounts.enterAccountName')
 })
 
 const isManualInputMethod = computed(() => {
@@ -4468,7 +4489,7 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
 const handleSubmit = async () => {
   // For OAuth-based type, handle OAuth flow (goes to step 2)
   if (isOAuthFlow.value) {
-    if (!form.name.trim()) {
+    if (isAccountNameRequired.value && !form.name.trim()) {
       appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
       return
     }
@@ -4791,6 +4812,11 @@ const createAccountAndFinish = async (
 const handleOpenAIExchange = async (authCode: string) => {
   const oauthClient = openaiOAuth
   if (!authCode.trim() || !oauthClient.sessionId.value) return
+  if (!form.name.trim()) {
+    oauthClient.error.value = t('admin.accounts.pleaseEnterAccountName')
+    appStore.showError(oauthClient.error.value)
+    return
+  }
 
   oauthClient.loading.value = true
   oauthClient.error.value = ''
@@ -4898,10 +4924,26 @@ const formatCodexImportMessages = (messages?: CodexSessionImportMessage[]) => {
     .join('\n')
 }
 
-const handleOpenAIImportCodexSession = async (content: string) => {
+type CodexSessionImportPayload = Pick<CodexSessionImportRequest, 'content' | 'contents' | 'items'>
+
+const handleOpenAIImportCodexSession = async (payload: CodexSessionImportPayload | string) => {
   const oauthClient = openaiOAuth
-  const trimmed = content.trim()
-  if (!trimmed) {
+  const trimmed = typeof payload === 'string' ? payload.trim() : payload.content?.trim() || ''
+  const contents =
+    typeof payload === 'string'
+      ? []
+      : (payload.contents || []).map((content) => content.trim()).filter((content) => content)
+  const items =
+    typeof payload === 'string'
+      ? []
+      : (payload.items || [])
+        .map((item) => ({
+          ...item,
+          name: item.name?.trim(),
+          content: item.content.trim()
+        }))
+        .filter((item) => item.content)
+  if (!trimmed && contents.length === 0 && items.length === 0) {
     oauthClient.error.value = t('admin.accounts.oauth.openai.codexSessionEmpty')
     return
   }
@@ -4917,7 +4959,9 @@ const handleOpenAIImportCodexSession = async (content: string) => {
   try {
     const extra = buildOpenAIExtra()
     const result = await adminAPI.accounts.importCodexSession({
-      content: trimmed,
+      content: trimmed || undefined,
+      contents: contents.length > 0 ? contents : undefined,
+      items: items.length > 0 ? items : undefined,
       name: form.name,
       notes: form.notes || null,
       proxy_id: form.proxy_id,

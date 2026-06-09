@@ -118,6 +118,21 @@ const gatewayForwardingCacheTTL = 60 * time.Second
 const gatewayForwardingErrorTTL = 5 * time.Second
 const gatewayForwardingDBTimeout = 5 * time.Second
 
+type cachedGatewayMaxAccountSwitches struct {
+	value     int
+	expiresAt int64 // unix nano
+}
+
+var gatewayMaxAccountSwitchesCache atomic.Value // *cachedGatewayMaxAccountSwitches
+var gatewayMaxAccountSwitchesSF singleflight.Group
+
+const gatewayMaxAccountSwitchesCacheTTL = 5 * time.Second
+const gatewayMaxAccountSwitchesErrorTTL = 5 * time.Second
+const gatewayMaxAccountSwitchesDBTimeout = 2 * time.Second
+const GatewayMaxAccountSwitchesDefault = 10
+const GatewayMaxAccountSwitchesMin = 1
+const GatewayMaxAccountSwitchesMax = 1000
+
 // cachedAntigravityUserAgentVersion 缓存 Antigravity UA 版本号（进程内缓存，60s TTL）
 type cachedAntigravityUserAgentVersion struct {
 	version   string
@@ -909,6 +924,94 @@ func clampChannelMonitorInterval(v int) int {
 		return channelMonitorIntervalMax
 	}
 	return v
+}
+
+func normalizeGatewayMaxAccountSwitches(v int, fallback int) int {
+	if fallback <= 0 {
+		fallback = GatewayMaxAccountSwitchesDefault
+	}
+	if v <= 0 {
+		v = fallback
+	}
+	if v < GatewayMaxAccountSwitchesMin {
+		return GatewayMaxAccountSwitchesMin
+	}
+	if v > GatewayMaxAccountSwitchesMax {
+		return GatewayMaxAccountSwitchesMax
+	}
+	return v
+}
+
+func (s *SettingService) defaultGatewayMaxAccountSwitches() int {
+	fallback := GatewayMaxAccountSwitchesDefault
+	if s != nil && s.cfg != nil && s.cfg.Gateway.MaxAccountSwitches > 0 {
+		fallback = s.cfg.Gateway.MaxAccountSwitches
+	}
+	return normalizeGatewayMaxAccountSwitches(fallback, GatewayMaxAccountSwitchesDefault)
+}
+
+func parseGatewayMaxAccountSwitches(raw string, fallback int) int {
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return normalizeGatewayMaxAccountSwitches(0, fallback)
+	}
+	return normalizeGatewayMaxAccountSwitches(v, fallback)
+}
+
+// GetGatewayMaxAccountSwitches returns the runtime account failover limit.
+// It is read on gateway hot paths, so it uses a short in-process cache and is
+// refreshed immediately after admin settings writes.
+func (s *SettingService) GetGatewayMaxAccountSwitches(ctx context.Context, fallback int) int {
+	fallback = normalizeGatewayMaxAccountSwitches(fallback, s.defaultGatewayMaxAccountSwitches())
+	if s == nil || s.settingRepo == nil {
+		return fallback
+	}
+	if cached, ok := gatewayMaxAccountSwitchesCache.Load().(*cachedGatewayMaxAccountSwitches); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return normalizeGatewayMaxAccountSwitches(cached.value, fallback)
+		}
+	}
+
+	result, _, _ := gatewayMaxAccountSwitchesSF.Do(SettingKeyGatewayMaxAccountSwitches, func() (any, error) {
+		if cached, ok := gatewayMaxAccountSwitchesCache.Load().(*cachedGatewayMaxAccountSwitches); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return normalizeGatewayMaxAccountSwitches(cached.value, fallback), nil
+			}
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayMaxAccountSwitchesDBTimeout)
+		defer cancel()
+
+		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyGatewayMaxAccountSwitches)
+		if err != nil {
+			if !errors.Is(err, ErrSettingNotFound) {
+				slog.Warn("failed to get gateway max account switches setting", "error", err)
+				gatewayMaxAccountSwitchesCache.Store(&cachedGatewayMaxAccountSwitches{
+					value:     fallback,
+					expiresAt: time.Now().Add(gatewayMaxAccountSwitchesErrorTTL).UnixNano(),
+				})
+				return fallback, nil
+			}
+			gatewayMaxAccountSwitchesCache.Store(&cachedGatewayMaxAccountSwitches{
+				value:     fallback,
+				expiresAt: time.Now().Add(gatewayMaxAccountSwitchesCacheTTL).UnixNano(),
+			})
+			return fallback, nil
+		}
+
+		parsed := parseGatewayMaxAccountSwitches(value, fallback)
+		gatewayMaxAccountSwitchesCache.Store(&cachedGatewayMaxAccountSwitches{
+			value:     parsed,
+			expiresAt: time.Now().Add(gatewayMaxAccountSwitchesCacheTTL).UnixNano(),
+		})
+		return parsed, nil
+	})
+	if v, ok := result.(int); ok {
+		return normalizeGatewayMaxAccountSwitches(v, fallback)
+	}
+	return fallback
 }
 
 // ChannelMonitorRuntime is the lightweight view of the channel monitor feature
@@ -1901,6 +2004,11 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 
 	// 分组隔离
 	updates[SettingKeyAllowUngroupedKeyScheduling] = strconv.FormatBool(settings.AllowUngroupedKeyScheduling)
+	settings.GatewayMaxAccountSwitches = normalizeGatewayMaxAccountSwitches(
+		settings.GatewayMaxAccountSwitches,
+		s.defaultGatewayMaxAccountSwitches(),
+	)
+	updates[SettingKeyGatewayMaxAccountSwitches] = strconv.Itoa(settings.GatewayMaxAccountSwitches)
 
 	// Backend Mode
 	updates[SettingKeyBackendModeEnabled] = strconv.FormatBool(settings.BackendModeEnabled)
@@ -2064,6 +2172,11 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
 		enabled:   settings.OpenAIAdvancedSchedulerEnabled,
 		expiresAt: time.Now().Add(openAIAdvancedSchedulerSettingCacheTTL).UnixNano(),
+	})
+	gatewayMaxAccountSwitchesSF.Forget(SettingKeyGatewayMaxAccountSwitches)
+	gatewayMaxAccountSwitchesCache.Store(&cachedGatewayMaxAccountSwitches{
+		value:     normalizeGatewayMaxAccountSwitches(settings.GatewayMaxAccountSwitches, s.defaultGatewayMaxAccountSwitches()),
+		expiresAt: time.Now().Add(gatewayMaxAccountSwitchesCacheTTL).UnixNano(),
 	})
 	// Invalidate the quota auto-pause cache and let the next read trigger a fresh load.
 	// We can't know from here whether ops_advanced_settings was also touched, so be
@@ -2825,6 +2938,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 
 		// 分组隔离（默认不允许未分组 Key 调度）
 		SettingKeyAllowUngroupedKeyScheduling:        "false",
+		SettingKeyGatewayMaxAccountSwitches:          strconv.Itoa(s.defaultGatewayMaxAccountSwitches()),
 		SettingKeyEnableAnthropicCacheTTL1hInjection: "false",
 		SettingKeyRewriteMessageCacheControl:         strconv.FormatBool(s.defaultRewriteMessageCacheControl()),
 		SettingKeyAntigravityUserAgentVersion:        "",
@@ -3334,6 +3448,10 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 
 	// 分组隔离
 	result.AllowUngroupedKeyScheduling = settings[SettingKeyAllowUngroupedKeyScheduling] == "true"
+	result.GatewayMaxAccountSwitches = parseGatewayMaxAccountSwitches(
+		settings[SettingKeyGatewayMaxAccountSwitches],
+		s.defaultGatewayMaxAccountSwitches(),
+	)
 
 	// Gateway forwarding behavior (defaults: fingerprint=true, metadata_passthrough=false, cch_signing=false)
 	if v, ok := settings[SettingKeyEnableFingerprintUnification]; ok && v != "" {

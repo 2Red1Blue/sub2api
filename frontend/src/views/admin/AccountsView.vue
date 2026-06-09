@@ -174,6 +174,7 @@
       <template #table>
         <AccountBulkActionsBar
           :selected-ids="selIds"
+          :total="pagination.total"
           @delete="handleBulkDelete"
           @reset-status="handleBulkResetStatus"
           @refresh-token="handleBulkRefreshToken"
